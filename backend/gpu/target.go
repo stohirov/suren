@@ -45,7 +45,11 @@ func newTarget(d *Device, w, h int) (*target, error) {
 	return &target{tex: tex, view: view, readbuf: readbuf, w: w, h: h, bpr: bpr}, nil
 }
 
-func (t *target) copyToReadbuf(enc *wgpu.CommandEncoder) {
+func (t *target) readRGBA(d *Device) (*image.RGBA, error) {
+	enc, err := d.device.CreateCommandEncoder(nil)
+	if err != nil {
+		return nil, err
+	}
 	enc.CopyTextureToBuffer(
 		t.tex.AsImageCopy(),
 		&wgpu.ImageCopyBuffer{
@@ -54,9 +58,15 @@ func (t *target) copyToReadbuf(enc *wgpu.CommandEncoder) {
 		},
 		&wgpu.Extent3D{Width: uint32(t.w), Height: uint32(t.h), DepthOrArrayLayers: 1},
 	)
-}
+	cmd, err := enc.Finish(nil)
+	if err != nil {
+		enc.Release()
+		return nil, err
+	}
+	d.queue.Submit(cmd)
+	cmd.Release()
+	enc.Release()
 
-func (t *target) readRGBA(d *Device) (*image.RGBA, error) {
 	size := uint64(t.bpr) * uint64(t.h)
 	done := false
 	var status wgpu.BufferMapAsyncStatus

@@ -57,3 +57,8 @@ func parity(t *testing.T, want *image.RGBA, sc *scene.Scene) {
 func TestParitySolid(t *testing.T) {
 	parity(t, cpu.Render(sample.Scene(), sample.W, sample.H), sample.Scene())
 }
+
+func TestParityManyNodes(t *testing.T) {
+	const w, h = 640, 360
+	parity(t, cpu.Render(sample.ManyNodes(w, h, 40, 24), w, h), sample.ManyNodes(w, h, 40, 24))
+}

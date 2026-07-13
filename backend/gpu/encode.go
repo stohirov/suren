@@ -1,6 +1,8 @@
 package gpu
 
 import (
+	"math"
+
 	"github.com/stohirov/sukho/geom"
 	"github.com/stohirov/sukho/paint"
 	"github.com/stohirov/sukho/path"
@@ -20,7 +22,7 @@ type Segment struct {
 }
 
 type Stop struct {
-	Offset  float32
+	Offset     float32
 	R, G, B, A float32
 }
 
@@ -35,10 +37,11 @@ type Node struct {
 	StopStart uint32
 	StopCount uint32
 	HasClip   uint32
-	Pad       uint32
+	Flags     uint32
 	Clip      [4]float32
+	BBox      [4]float32
 	Minv      [6]float32
-	Pad2      [2]float32
+	Pad       [2]float32
 }
 
 type Encoded struct {
@@ -46,6 +49,8 @@ type Encoded struct {
 	Segments      []Segment
 	Nodes         []Node
 	Stops         []Stop
+	BinOffsets    []uint32
+	BinNodes      []uint32
 }
 
 func Encode(s *scene.Scene, w, h int) *Encoded {
@@ -74,12 +79,33 @@ func Encode(s *scene.Scene, w, h int) *Encoded {
 			SegCount: uint32(len(e.Segments)) - start,
 			Rule:     rule,
 			Kind:     uint32(kind),
+			BBox:     segBounds(e.Segments[start:]),
 		}
 		e.fillPaint(&nd, kind, n)
 		setClip(&nd, n.Clip, w, h)
 		e.Nodes = append(e.Nodes, nd)
 	}
+	e.BinOffsets, e.BinNodes = buildBins(e.Nodes, h)
 	return e
+}
+
+func buildBins(nodes []Node, h int) ([]uint32, []uint32) {
+	rows := make([][]uint32, h)
+	for ni := range nodes {
+		y0 := clampInt(int(math.Floor(float64(nodes[ni].BBox[1]))), 0, h)
+		y1 := clampInt(int(math.Ceil(float64(nodes[ni].BBox[3]))), 0, h)
+		for y := y0; y < y1; y++ {
+			rows[y] = append(rows[y], uint32(ni))
+		}
+	}
+	offsets := make([]uint32, h+1)
+	var flat []uint32
+	for y := 0; y < h; y++ {
+		offsets[y] = uint32(len(flat))
+		flat = append(flat, rows[y]...)
+	}
+	offsets[h] = uint32(len(flat))
+	return offsets, flat
 }
 
 func (e *Encoded) fillPaint(nd *Node, kind PaintKind, n scene.Node) {
@@ -154,6 +180,20 @@ func appendStops(dst []Stop, stops []paint.Stop) []Stop {
 	return dst
 }
 
+func segBounds(segs []Segment) [4]float32 {
+	minx, miny := segs[0].X0, segs[0].Y0
+	maxx, maxy := minx, miny
+	upd := func(x, y float32) {
+		minx, miny = min(minx, x), min(miny, y)
+		maxx, maxy = max(maxx, x), max(maxy, y)
+	}
+	for _, s := range segs {
+		upd(s.X0, s.Y0)
+		upd(s.X1, s.Y1)
+	}
+	return [4]float32{minx, miny, maxx, maxy}
+}
+
 func setClip(nd *Node, r *geom.Rect, w, h int) {
 	if r == nil {
 		nd.Clip = [4]float32{0, 0, float32(w), float32(h)}
@@ -178,4 +218,14 @@ func premul(c paint.Color) [4]float32 {
 func invMatrix(m geom.Matrix) [6]float32 {
 	inv, _ := m.Invert()
 	return [6]float32{float32(inv.A), float32(inv.B), float32(inv.C), float32(inv.D), float32(inv.E), float32(inv.F)}
+}
+
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }

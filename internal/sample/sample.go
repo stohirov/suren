@@ -73,6 +73,20 @@ func GradientScene() *scene.Scene {
 	return c.Scene()
 }
 
+func ManyNodes(w, h, cols, rows int) *scene.Scene {
+	c := render.NewCanvas()
+	c.FillColor(path.Rect(geom.RectXYWH(0, 0, float64(w), float64(h))), paint.FromRGBA8(20, 22, 28, 255))
+	cw, ch := float64(w)/float64(cols), float64(h)/float64(rows)
+	for y := 0; y < rows; y++ {
+		for x := 0; x < cols; x++ {
+			cx, cy := (float64(x)+0.5)*cw, (float64(y)+0.5)*ch
+			col := paint.FromRGBA8(uint8(x*6), uint8(y*10), 200, 255)
+			c.FillColor(path.Circle(geom.Pt(cx, cy), ch*0.35), col)
+		}
+	}
+	return c.Scene()
+}
+
 func appendPath(dst *path.Path, src path.Path) {
 	it := src.Iter()
 	for {

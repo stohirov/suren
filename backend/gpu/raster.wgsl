@@ -4,10 +4,11 @@ struct Node {
   segStart: u32, segCount: u32, rule: u32, kind: u32,
   cr: f32, cg: f32, cb: f32, ca: f32,
   g0x: f32, g0y: f32, g1x: f32, g1y: f32,
-  stopStart: u32, stopCount: u32, hasClip: u32, pad: u32,
+  stopStart: u32, stopCount: u32, hasClip: u32, flags: u32,
   clx0: f32, cly0: f32, clx1: f32, cly1: f32,
+  bbx0: f32, bby0: f32, bbx1: f32, bby1: f32,
   m0: f32, m1: f32, m2: f32, m3: f32, m4: f32, m5: f32,
-  pad2a: f32, pad2b: f32,
+  pad0: f32, pad1: f32,
 };
 
 struct Dims { w: u32, h: u32, n: u32, pad: u32 };
@@ -19,6 +20,12 @@ struct Dims { w: u32, h: u32, n: u32, pad: u32 };
 @group(0) @binding(4) var<storage, read_write> fb: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read_write> cover: array<f32>;
 @group(0) @binding(6) var<storage, read_write> area: array<f32>;
+@group(0) @binding(7) var<storage, read> binOffsets: array<u32>;
+@group(0) @binding(8) var<storage, read> binNodes: array<u32>;
+
+fn clampi(v: i32, lo: i32, hi: i32) -> i32 {
+  return max(lo, min(v, hi));
+}
 
 fn coverage(wv: f32, rule: u32) -> f32 {
   var a = abs(wv);
@@ -97,10 +104,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     fb[base + u32(x)] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
   }
 
-  for (var ni = 0u; ni < dims.n; ni = ni + 1u) {
-    let nd = nodes[ni];
+  let start = binOffsets[u32(y)];
+  let end = binOffsets[u32(y) + 1u];
+  for (var k = start; k < end; k = k + 1u) {
+    let nd = nodes[binNodes[k]];
 
-    for (var x = 0; x < W; x = x + 1) {
+    let bx0 = clampi(i32(floor(nd.bbx0)), 0, W);
+    let bx1 = clampi(i32(floor(nd.bbx1)) + 1, 0, W);
+    if (bx0 >= bx1) { continue; }
+
+    let cly0 = i32(floor(nd.cly0));
+    let cly1 = i32(ceil(nd.cly1));
+    if (y < cly0 || y >= cly1) { continue; }
+    let clx0 = max(bx0, max(0, i32(floor(nd.clx0))));
+    let clx1 = min(bx1, min(W, i32(ceil(nd.clx1))));
+
+    for (var x = bx0; x < bx1; x = x + 1) {
       cover[base + u32(x)] = 0.0;
       area[base + u32(x)] = 0.0;
     }
@@ -110,14 +129,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       addSeg(segs[si], y, base, W);
     }
 
-    let cly0 = i32(floor(nd.cly0));
-    let cly1 = i32(ceil(nd.cly1));
-    if (y < cly0 || y >= cly1) { continue; }
-    let clx0 = max(0, i32(floor(nd.clx0)));
-    let clx1 = min(W, i32(ceil(nd.clx1)));
-
     var acc = 0.0;
-    for (var x = 0; x < W; x = x + 1) {
+    for (var x = bx0; x < bx1; x = x + 1) {
       acc = acc + cover[base + u32(x)];
       if (x < clx0 || x >= clx1) { continue; }
       let alpha = coverage(acc - area[base + u32(x)] * 0.5, nd.rule);

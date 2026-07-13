@@ -69,7 +69,7 @@ func newRasterizer(d *Device, w, h int) (*rasterizer, error) {
 	}, nil
 }
 
-func (r *rasterizer) run(d *Device, t *target, segs, nodes *wgpu.Buffer, nNodes int) error {
+func (r *rasterizer) run(d *Device, t *target, segs, nodes, binOff, binNodes *wgpu.Buffer, nNodes int) error {
 	dims := [4]uint32{uint32(r.w), uint32(r.h), uint32(nNodes), 0}
 	if err := d.queue.WriteBuffer(r.uniform, 0, unsafe.Slice((*byte)(unsafe.Pointer(&dims[0])), 16)); err != nil {
 		return err
@@ -85,6 +85,8 @@ func (r *rasterizer) run(d *Device, t *target, segs, nodes *wgpu.Buffer, nNodes 
 			{Binding: 4, Buffer: r.fb, Size: r.fb.GetSize()},
 			{Binding: 5, Buffer: r.cover, Size: r.cover.GetSize()},
 			{Binding: 6, Buffer: r.area, Size: r.area.GetSize()},
+			{Binding: 7, Buffer: binOff, Size: binOff.GetSize()},
+			{Binding: 8, Buffer: binNodes, Size: binNodes.GetSize()},
 		},
 	})
 	if err != nil {
@@ -102,8 +104,6 @@ func (r *rasterizer) run(d *Device, t *target, segs, nodes *wgpu.Buffer, nNodes 
 	pass.DispatchWorkgroups((uint32(r.h)+63)/64, 1, 1)
 	pass.End()
 	pass.Release()
-
-	t.copyToReadbuf(enc)
 
 	cmd, err := enc.Finish(nil)
 	if err != nil {
