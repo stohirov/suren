@@ -17,7 +17,7 @@ type target struct {
 
 func newTarget(d *Device, w, h int) (*target, error) {
 	tex, err := d.device.CreateTexture(&wgpu.TextureDescriptor{
-		Usage:         wgpu.TextureUsageRenderAttachment | wgpu.TextureUsageCopySrc,
+		Usage:         wgpu.TextureUsageStorageBinding | wgpu.TextureUsageCopySrc,
 		Dimension:     wgpu.TextureDimension2D,
 		Size:          wgpu.Extent3D{Width: uint32(w), Height: uint32(h), DepthOrArrayLayers: 1},
 		Format:        wgpu.TextureFormatRGBA8Unorm,
@@ -45,22 +45,7 @@ func newTarget(d *Device, w, h int) (*target, error) {
 	return &target{tex: tex, view: view, readbuf: readbuf, w: w, h: h, bpr: bpr}, nil
 }
 
-func (t *target) clear(d *Device, c wgpu.Color) error {
-	enc, err := d.device.CreateCommandEncoder(nil)
-	if err != nil {
-		return err
-	}
-	pass := enc.BeginRenderPass(&wgpu.RenderPassDescriptor{
-		ColorAttachments: []wgpu.RenderPassColorAttachment{{
-			View:       t.view,
-			LoadOp:     wgpu.LoadOpClear,
-			StoreOp:    wgpu.StoreOpStore,
-			ClearValue: c,
-		}},
-	})
-	pass.End()
-	pass.Release()
-
+func (t *target) copyToReadbuf(enc *wgpu.CommandEncoder) {
 	enc.CopyTextureToBuffer(
 		t.tex.AsImageCopy(),
 		&wgpu.ImageCopyBuffer{
@@ -69,16 +54,6 @@ func (t *target) clear(d *Device, c wgpu.Color) error {
 		},
 		&wgpu.Extent3D{Width: uint32(t.w), Height: uint32(t.h), DepthOrArrayLayers: 1},
 	)
-
-	cmd, err := enc.Finish(nil)
-	if err != nil {
-		enc.Release()
-		return err
-	}
-	d.queue.Submit(cmd)
-	cmd.Release()
-	enc.Release()
-	return nil
 }
 
 func (t *target) readRGBA(d *Device) (*image.RGBA, error) {

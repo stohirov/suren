@@ -1,10 +1,12 @@
 package gpu
 
 import (
+	"image"
 	"testing"
 
-	"github.com/cogentcore/webgpu/wgpu"
+	"github.com/stohirov/sukho/backend/cpu"
 	"github.com/stohirov/sukho/internal/sample"
+	"github.com/stohirov/sukho/scene"
 )
 
 func TestDeviceInit(t *testing.T) {
@@ -17,30 +19,41 @@ func TestDeviceInit(t *testing.T) {
 	t.Logf("adapter backend=%v type=%v", info.BackendType, info.AdapterType)
 }
 
-func TestRenderClearReadback(t *testing.T) {
-	r, err := NewRenderer(sample.W, sample.H)
+func parity(t *testing.T, want *image.RGBA, sc *scene.Scene) {
+	t.Helper()
+	r, err := NewRenderer(want.Rect.Dx(), want.Rect.Dy())
 	if err != nil {
 		t.Skipf("no gpu device: %v", err)
 	}
 	defer r.Release()
 
-	r.Background = wgpu.Color{R: 0.2, G: 0.4, B: 0.6, A: 1}
-	if err := r.Render(sample.Scene()); err != nil {
+	if err := r.Render(sc); err != nil {
 		t.Fatalf("render: %v", err)
 	}
-	img, err := r.ReadRGBA()
+	got, err := r.ReadRGBA()
 	if err != nil {
 		t.Fatalf("readback: %v", err)
 	}
 
-	want := [4]uint8{51, 102, 153, 255}
-	for _, p := range [][2]int{{0, 0}, {sample.W / 2, sample.H / 2}, {sample.W - 1, sample.H - 1}} {
-		i := img.PixOffset(p[0], p[1])
-		got := [4]uint8{img.Pix[i], img.Pix[i+1], img.Pix[i+2], img.Pix[i+3]}
-		for c := 0; c < 4; c++ {
-			if d := int(got[c]) - int(want[c]); d < -1 || d > 1 {
-				t.Fatalf("pixel %v = %v, want ~%v", p, got, want)
-			}
+	maxd, over := 0, 0
+	for i := range want.Pix {
+		d := int(got.Pix[i]) - int(want.Pix[i])
+		if d < 0 {
+			d = -d
+		}
+		if d > maxd {
+			maxd = d
+		}
+		if d > 2 {
+			over++
 		}
 	}
+	t.Logf("max channel delta=%d, channels off-by->2: %d/%d", maxd, over, len(want.Pix))
+	if maxd > 2 {
+		t.Fatalf("gpu/cpu mismatch: max channel delta=%d (want <=2)", maxd)
+	}
+}
+
+func TestParitySolid(t *testing.T) {
+	parity(t, cpu.Render(sample.Scene(), sample.W, sample.H), sample.Scene())
 }
