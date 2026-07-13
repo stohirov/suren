@@ -185,39 +185,46 @@ one GPU→CPU→GPU roundtrip — removed in 6b.
 **Done when:** the sample scene presents directly from GPU memory with no readback, on
 darwin/arm64 (Metal). CI still gates on the offscreen parity tests, not the window.
 
-## Phase 7 — kill per-frame cost (buffer reuse for static & animated scenes)
+## Phase 7 — kill per-frame cost (buffer reuse for static & animated scenes)  ✅
 
-Every `Render` today runs `Encode` (fresh Go slices), `releaseBuffers`, then recreates all
-five GPU buffers via `CreateBufferInit`. Encode is ~22% of the frame (~0.65 ms) and buffer
-churn adds more. Three independent wins, cheapest first.
+Every `Render` used to run `Encode` (fresh Go slices), `releaseBuffers`, then recreate all
+five GPU buffers via `CreateBufferInit`. Encode was ~22% of the frame (~0.65 ms) and buffer
+churn added more. Three independent wins, cheapest first.
 
-### 7a — reuse GPU buffers in place
+### 7a — reuse GPU buffers in place  ✅ `7e483aa`
 
-- [ ] Instead of release+recreate each frame, keep the five `*wgpu.Buffer`s and
-      `queue.WriteBuffer` into them when the new byte length fits; only recreate (grow,
-      with some slack) when it doesn't. Removes per-frame buffer allocation for
-      steady-state scenes regardless of content. Requires the buffers carry
-      `BufferUsageCopyDst`.
+- [x] Keep the five `*wgpu.Buffer`s and `queue.WriteBuffer` into them when the new byte
+      length fits; recreate (grow ×1.5 with slack) only when it doesn't. Buffers carry
+      `BufferUsageCopyDst`; the shader indexes by node/tile records (never `arrayLength`),
+      so slack past the written data is never read.
 
-### 7b — reuse encoder scratch (no per-frame Go allocation)
+### 7b — reuse encoder scratch (no per-frame Go allocation)  ✅ `ca51963`
 
-- [ ] `EncodeInto(e *Encoded, s, w, h)`: reset slice lengths, keep capacity, append into
-      the retained `Encoded`. `Renderer` owns one `Encoded`. Mirrors the CPU engine's
-      "reuse one `Rasterizer`" win from Phase 1. Confirm with `-benchmem` that the encode
-      benchmark drops to ~0 allocs/op.
+- [x] `EncodeInto(e *Encoded, s, w, h)`: reset slice lengths, keep capacity, append into
+      the retained `Encoded` (the `Renderer` owns one). `path.FlattenInto` takes a reusable
+      point-scratch buffer so per-path curve flattening stops allocating. `buildTileBins`
+      rewritten as a **counting sort** into reused `TileOffsets`/`TileNodes`/cursor scratch,
+      killing the per-tile `[]uint32` slices (the background rect alone touched every tile →
+      ~3600 allocs/frame). Scene order within a tile preserved.
 
-### 7c — skip work when the scene is unchanged
+**Result:** `BenchmarkEncodeManyNodes` **10136 → 0 allocs/op** (2.87 MB → 0 B/op), encode
+647 → 433 µs. GPU per-frame (changing scene) **10187 → 51 allocs/op, 2.87 MB → 976 B/op**,
+4.45 → 3.32 ms — the residual is cgo command-encoder/bind-group churn, not the encoder.
 
-- [ ] Fingerprint the encoded scene (fnv/xxhash over the flattened `Segments`+`Nodes`+
-      `Stops` bytes, computed during `EncodeInto`). If it matches the last frame's:
-      skip re-upload; optionally skip the dispatch entirely and re-present the last
-      texture (in 6b, just present the existing swapchain-blit source). Biggest win for
-      truly static or partially-static UIs.
-- [ ] Note the trade: hashing the byte buffers is O(scene) but far cheaper than upload +
-      dispatch. Measure that it's a net win before keeping it.
+### 7c — skip work when the scene is unchanged  ✅ `7f69d05`
 
-**Done when:** `BenchmarkEncodeManyNodes` reports ~0 allocs/op; `BenchmarkGPUManyNodes`
-improves on the steady-state (unchanged-scene) path; parity tests unchanged.
+- [x] FNV-1a fingerprint (word-wise, via `unsafe`, 0-alloc, no cgo pulled into the pure-Go
+      encoder) over `Width/Height` + flattened `Segments`+`Nodes`+`Stops` bytes, computed in
+      `EncodeInto`. If it matches the last frame's, `Render` skips the upload **and** the
+      dispatch and re-presents the retained target texture. `Resize` invalidates the retained
+      frame (`haveFrame=false`). `TestUnchangedSceneSkips` asserts a dispatch counter: skip on
+      repeat, re-dispatch on change, correct pixels on both.
+- [x] Trade measured: hash costs ~55 µs; it saves ~2.8 ms of upload+dispatch+sync when the
+      scene repeats — 6.7× on static, 1.7% overhead on always-changing frames. Net keep.
+
+**Result:** steady-state (unchanged scene) GPU **3.32 → 0.49 ms (6.7×)**, 0 allocs/op; parity
+(solid Δ=1, many-nodes Δ=0, gradient Δ=1, clip Δ=0) and resize parity unchanged; window
+cpu-vs-gpu bridge parity unchanged.
 
 ## Phase 8 — coarse segment lists (scalability for complex paths)
 
