@@ -50,7 +50,7 @@ func (r *Renderer) Render(s *scene.Scene) error {
 	if err := r.upload(e); err != nil {
 		return err
 	}
-	return r.ras.run(r.dev, r.target, r.segBuf, r.nodeBuf, r.tileOff, r.tileNode, r.nx, r.ny)
+	return r.ras.run(r.dev, r.target, r.segBuf, r.nodeBuf, r.tileOff, r.tileNode, r.stopBuf, r.nx, r.ny)
 }
 
 func (r *Renderer) ReadRGBA() (*image.RGBA, error) { return r.target.readRGBA(r.dev) }
@@ -84,7 +84,7 @@ func (r *Renderer) upload(e *Encoded) error {
 
 func (r *Renderer) storage(data []byte) (*wgpu.Buffer, error) {
 	if len(data) == 0 {
-		return r.dev.device.CreateBuffer(&wgpu.BufferDescriptor{Size: 16, Usage: wgpu.BufferUsageStorage})
+		return r.dev.device.CreateBuffer(&wgpu.BufferDescriptor{Size: 32, Usage: wgpu.BufferUsageStorage})
 	}
 	return r.dev.device.CreateBufferInit(&wgpu.BufferInitDescriptor{
 		Contents: data,

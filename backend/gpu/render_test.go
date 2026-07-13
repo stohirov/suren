@@ -67,6 +67,10 @@ func TestParityManyNodes(t *testing.T) {
 	parity(t, cpu.Render(sample.ManyNodes(w, h, 40, 24), w, h), sample.ManyNodes(w, h, 40, 24))
 }
 
+func TestParityGradient(t *testing.T) {
+	parity(t, cpu.Render(sample.GradientScene(), sample.W, sample.H), sample.GradientScene())
+}
+
 func clipScene() *scene.Scene {
 	c := render.NewCanvas()
 	c.FillColor(path.Rect(geom.RectXYWH(0, 0, 96, 96)), paint.FromRGBA8(30, 30, 40, 255))

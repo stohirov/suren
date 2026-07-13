@@ -109,17 +109,18 @@ Diagnosis: row-serial design caps parallelism at H threads; global scratch domin
 **Result:** GPU **2.93 ms**, **3.75× over CPU** (10.99 ms); parallelism 720 → ~57,600
 threads. Parity: sample Δ=1, many-nodes Δ=0, clip Δ=0.
 
-## Phase 5 — gradients + clip in the fine shader  ⏳ next
+## Phase 5 — gradients in the fine shader  ✅
 
-- [ ] Evaluate `Kind == Linear/Radial` in `raster.wgsl` per pixel: apply the node's
+- [x] Evaluate `Kind == Linear/Radial` in `raster.wgsl` per pixel: apply the node's
       inverse matrix to the pixel center, compute the gradient parameter, interpolate
-      the stop table (pad spread) — the CPU `gradShader` math ported. Encoder already
-      emits gradient geometry, inverse transform, and stops.
-- [ ] Confirm clip parity beyond the rectangular case already covered.
-- [ ] Parity test on `sample.GradientScene()` (currently rendered transparent by the
-      solid-only shader).
+      the stop table (pad spread) — the CPU `gradShader` math ported verbatim. Encoder
+      already emitted gradient geometry, inverse transform, and stops; added a 7th
+      binding for the stop buffer and premultiply-on-eval to match the CPU shader.
+- [x] Parity test on `sample.GradientScene()` (linear fill, radial fill with a
+      transparent end stop, gradient-painted stroke). **Max channel delta 1.**
 
-**Done when:** GPU matches CPU within tolerance on the gradient sample scene.
+**Result:** GPU matches CPU on the gradient sample scene (Δ=1, 8-bit quantization
+only); solid/many-nodes/clip parity unchanged (Δ=1/0/0).
 
 ## Future work (post-parity)
 

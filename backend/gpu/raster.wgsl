@@ -13,6 +13,8 @@ struct Node {
 
 struct Dims { w: u32, h: u32, nx: u32, ny: u32 };
 
+struct Stop { off: f32, r: f32, g: f32, b: f32, a: f32 };
+
 const TILE: i32 = 16;
 
 @group(0) @binding(0) var out_tex: texture_storage_2d<rgba8unorm, write>;
@@ -21,6 +23,55 @@ const TILE: i32 = 16;
 @group(0) @binding(3) var<uniform> dims: Dims;
 @group(0) @binding(4) var<storage, read> tileOffsets: array<u32>;
 @group(0) @binding(5) var<storage, read> tileNodes: array<u32>;
+@group(0) @binding(6) var<storage, read> stops: array<Stop>;
+
+fn interpStops(start: u32, count: u32, t: f32) -> vec4<f32> {
+  if (count == 0u) { return vec4<f32>(0.0); }
+  let s0 = stops[start];
+  if (t <= s0.off) { return vec4<f32>(s0.r, s0.g, s0.b, s0.a); }
+  let last = stops[start + count - 1u];
+  if (t >= last.off) { return vec4<f32>(last.r, last.g, last.b, last.a); }
+  for (var i = 1u; i < count; i = i + 1u) {
+    let hi = stops[start + i];
+    if (t <= hi.off) {
+      let lo = stops[start + i - 1u];
+      let span = hi.off - lo.off;
+      if (span <= 0.0) { return vec4<f32>(hi.r, hi.g, hi.b, hi.a); }
+      let u = (t - lo.off) / span;
+      return vec4<f32>(
+        lo.r + (hi.r - lo.r) * u,
+        lo.g + (hi.g - lo.g) * u,
+        lo.b + (hi.b - lo.b) * u,
+        lo.a + (hi.a - lo.a) * u,
+      );
+    }
+  }
+  return vec4<f32>(last.r, last.g, last.b, last.a);
+}
+
+fn gradColor(nd: Node, px: f32, py: f32) -> vec4<f32> {
+  let qx = nd.m0 * px + nd.m2 * py + nd.m4;
+  let qy = nd.m1 * px + nd.m3 * py + nd.m5;
+  var t = 0.0;
+  if (nd.kind == 1u) {
+    let dx = nd.g1x - nd.g0x;
+    let dy = nd.g1y - nd.g0y;
+    let len2 = dx * dx + dy * dy;
+    if (len2 > 0.0) {
+      t = ((qx - nd.g0x) * dx + (qy - nd.g0y) * dy) / len2;
+    }
+  } else {
+    let radius = nd.g1x;
+    if (radius > 0.0) {
+      let dx = qx - nd.g0x;
+      let dy = qy - nd.g0y;
+      t = sqrt(dx * dx + dy * dy) / radius;
+    }
+  }
+  let c = interpStops(nd.stopStart, nd.stopCount, t);
+  let ca = clamp(c.w, 0.0, 1.0);
+  return vec4<f32>(clamp(c.x, 0.0, 1.0) * ca, clamp(c.y, 0.0, 1.0) * ca, clamp(c.z, 0.0, 1.0) * ca, ca);
+}
 
 fn coverage(wv: f32, rule: u32) -> f32 {
   var a = abs(wv);
@@ -145,13 +196,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       if (gx < clx0 || gx >= clx1) { continue; }
       let alpha = coverage(acc - ar[lx] * 0.5, nd.rule);
       if (alpha > 0.0) {
+        var src = vec4<f32>(nd.cr, nd.cg, nd.cb, nd.ca);
+        if (nd.kind != 0u) {
+          src = gradColor(nd, f32(gx) + 0.5, f32(y) + 0.5);
+        }
         let dst = fbl[lx];
-        let invc = 1.0 - nd.ca * alpha;
+        let invc = 1.0 - src.w * alpha;
         fbl[lx] = vec4<f32>(
-          nd.cr * alpha + dst.x * invc,
-          nd.cg * alpha + dst.y * invc,
-          nd.cb * alpha + dst.z * invc,
-          nd.ca * alpha + dst.w * invc,
+          src.x * alpha + dst.x * invc,
+          src.y * alpha + dst.y * invc,
+          src.z * alpha + dst.z * invc,
+          src.w * alpha + dst.w * invc,
         );
       }
     }
