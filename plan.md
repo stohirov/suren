@@ -226,30 +226,57 @@ churn added more. Three independent wins, cheapest first.
 (solid Δ=1, many-nodes Δ=0, gradient Δ=1, clip Δ=0) and resize parity unchanged; window
 cpu-vs-gpu bridge parity unchanged.
 
-## Phase 8 — coarse segment lists (scalability for complex paths)
+## Phase 8 — coarse segment lists (scalability for complex paths)  ⏳ in progress
 
-The known weak spot: each tile re-iterates a node's **full** segment list to route the
-backdrop (`routeSeg` early-outs by x but still loops every segment). For a single huge
-many-segment path spanning many tiles that's O(tiles × segments) redundant work — the
-Vello coarse-pass answer removes it.
+The known weak spot: each tile re-iterated a node's **full** segment list (`routeSeg`
+early-outs by x but still loops every segment). For a single huge many-segment path spanning
+many tiles that's O(tiles × segments) redundant work — the Vello coarse-pass answer removes it.
 
-- [ ] **Measure first.** Build a pathological `sample` scene (one path, thousands of
-      segments, covering most tiles) and a benchmark; quantify the redundancy against the
-      typical many-nodes scene. Only invest if the slowdown is real on realistic inputs.
-- [ ] **Coarse pass** producing, per tile: the list of segments that actually intersect it
-      **and** a precomputed backdrop (winding from segments entirely left of the tile) so
-      the fine shader seeds its accumulator without re-scanning left-of-tile geometry.
-      Start CPU-side in `Encode` for a correctness baseline (extend `buildTileBins` to emit
-      per-tile segment ranges + backdrops); move to a GPU compute coarse pass if the CPU
-      cost shows up (the real Vello architecture: path → coarse → tile → fine).
-- [ ] Fine shader (`raster.wgsl`) consumes per-tile segment lists + stored backdrop instead
-      of iterating `nd.segStart..segCount`.
-- [ ] Watch memory: a segment crossing N tiles is referenced N times — bound it, and
-      `log`/document any cap rather than silently truncating.
+### Measure first  ✅ `d511207`
 
-**Done when:** parity holds (Δ within tolerance) on the pathological scene **and** all
-existing scenes, with a measured speedup on the many-segment case and no regression on
-typical scenes.
+- [x] `sample.ManySegments` (one dense star polygon: 2 nodes, ~4 k line segments, bbox over
+      most of the canvas) + `BenchmarkGPUDispatch*` (dispatch-only, bypassing 7c's skip) and
+      a `TestPhase8Redundancy` diagnostic that counts naive segment-scans from the encoder.
+
+**Measured (1280×720):** many-segs did **127 M** segment-scans (**31,706×** amplification) vs
+many-nodes' 1.4 M (86×), and its GPU dispatch ran **5.34 ms vs 2.38 ms** — 2.2× slower on 4×
+*fewer* segments. The redundancy is real on a realistic single complex path.
+
+### Per-tile segment lists  ✅ `7c00227`
+
+- [x] Encoder emits per-(tile,node) segment sublists (`TileSegOff`/`TileSegIdx`) via a
+      **segment-centric scatter** (O(segment-memberships), not O(tiles × segments)), fully
+      scratch-reused so encode stays **0 allocs/op**. Rule: a segment is listed in a tile iff
+      its bbox y-band overlaps the tile **and** `minx < tile.right` — this keeps left-of-tile
+      segments so the fine shader's existing per-scanline `routeSeg` backdrop is unchanged
+      (precomputed backdrops deferred; that's the memory-optimal follow-up).
+- [x] Fine shader iterates `tileSegOff[k]..tileSegOff[k+1]` (indices into `tileSegIdx`) for
+      node-entry `k`, instead of `nd.segStart..segCount`. Two new storage bindings (7 storage
+      buffers total, under the 8 limit).
+- [x] Memory: a left segment is referenced by every tile to its right in its band — bounded,
+      **not capped** (a cap would corrupt the backdrop). Measured `len(TileSegIdx)`:
+      many-nodes 31 k refs (~125 KB), many-segs 722 k refs (~2.9 MB). Documented as the
+      signal for the precomputed-backdrop upgrade if it ever grows.
+
+**Result:** dispatch **many-segs 5.34 → 2.78 ms (1.9×)**, **many-nodes 2.38 → 1.54 ms (1.5×)**;
+segment work cut **45×** (many-nodes) / **176×** (many-segs). Parity holds everywhere (solid
+Δ=1, many-nodes Δ=0, gradient Δ=1, **many-segs Δ=1**, clip Δ=0, resize Δ=0). Encode adds the
+scatter cost (many-nodes 433 → 747 µs, many-segs ~1.0 ms), still 0 allocs/op — paid per frame
+only when the scene changes; a static scene still skips upload+dispatch via 7c.
+
+### Remaining (optional, deferred)
+
+- [ ] **Precomputed per-scanline backdrop** (full Vello coarse pass): store the winding
+      entering each tile so the fine shader lists *only* intersecting segments — drops the
+      722 k → ~O(segments) memory and the residual 180× amplification. Needs a horizontal
+      winding prefix-sum in the encoder.
+- [ ] **Skip `buildTiles` on unchanged scene** (7c refinement): fingerprint before the tile
+      build and reuse last frame's tile slices — removes the coarse-pass encode cost on static
+      scenes (restores the ~0.5 ms static frame).
+- [ ] **GPU coarse pass** if the CPU scatter ever dominates the frame for changing scenes.
+
+**Done when (baseline):** parity holds on the pathological scene **and** all existing scenes,
+with a measured speedup on the many-segment case and no regression on typical scenes. ✅
 
 ## Phase 9 — GPU-side flattening / stroke expansion (only if encode dominates)
 
