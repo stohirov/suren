@@ -55,10 +55,22 @@ type Encoded struct {
 	Stops         []Stop
 	TileOffsets   []uint32
 	TileNodes     []uint32
+
+	flatScratch []geom.Point
+	tileCursor  []uint32
 }
 
 func Encode(s *scene.Scene, w, h int) *Encoded {
-	e := &Encoded{Width: w, Height: h}
+	e := &Encoded{}
+	EncodeInto(e, s, w, h)
+	return e
+}
+
+func EncodeInto(e *Encoded, s *scene.Scene, w, h int) {
+	e.Width, e.Height = w, h
+	e.Segments = e.Segments[:0]
+	e.Nodes = e.Nodes[:0]
+	e.Stops = e.Stops[:0]
 	for _, n := range s.Nodes {
 		kind, ok := paintKind(n.Paint)
 		if !ok {
@@ -74,7 +86,7 @@ func Encode(s *scene.Scene, w, h int) *Encoded {
 			rule = 0
 		}
 		start := uint32(len(e.Segments))
-		e.Segments = appendSegments(e.Segments, geo, n.Transform)
+		e.appendSegments(geo, n.Transform)
 		if uint32(len(e.Segments)) == start {
 			continue
 		}
@@ -91,32 +103,63 @@ func Encode(s *scene.Scene, w, h int) *Encoded {
 	}
 	e.NTilesX = (w + tileSize - 1) / tileSize
 	e.NTilesY = (h + tileSize - 1) / tileSize
-	e.TileOffsets, e.TileNodes = buildTileBins(e.Nodes, e.NTilesX, e.NTilesY)
-	return e
+	e.buildTileBins()
 }
 
-func buildTileBins(nodes []Node, nx, ny int) ([]uint32, []uint32) {
-	tiles := make([][]uint32, nx*ny)
-	for ni := range nodes {
-		bb := nodes[ni].BBox
-		tx0 := clampInt(int(math.Floor(float64(bb[0])))/tileSize, 0, nx)
-		tx1 := clampInt(int(math.Floor(float64(bb[2])))/tileSize+1, 0, nx)
-		ty0 := clampInt(int(math.Floor(float64(bb[1])))/tileSize, 0, ny)
-		ty1 := clampInt(int(math.Floor(float64(bb[3])))/tileSize+1, 0, ny)
+func (e *Encoded) buildTileBins() {
+	nx, ny := e.NTilesX, e.NTilesY
+	nt := nx * ny
+	e.TileOffsets = resetU32(e.TileOffsets, nt+1)
+	e.tileCursor = resetU32(e.tileCursor, nt)
+
+	for ni := range e.Nodes {
+		tx0, tx1, ty0, ty1 := tileRange(e.Nodes[ni].BBox, nx, ny)
 		for ty := ty0; ty < ty1; ty++ {
 			for tx := tx0; tx < tx1; tx++ {
-				tiles[ty*nx+tx] = append(tiles[ty*nx+tx], uint32(ni))
+				e.TileOffsets[ty*nx+tx+1]++
 			}
 		}
 	}
-	offsets := make([]uint32, nx*ny+1)
-	var flat []uint32
-	for i, t := range tiles {
-		offsets[i] = uint32(len(flat))
-		flat = append(flat, t...)
+	for i := 1; i <= nt; i++ {
+		e.TileOffsets[i] += e.TileOffsets[i-1]
 	}
-	offsets[nx*ny] = uint32(len(flat))
-	return offsets, flat
+	copy(e.tileCursor, e.TileOffsets[:nt])
+
+	total := int(e.TileOffsets[nt])
+	if cap(e.TileNodes) < total {
+		e.TileNodes = make([]uint32, total)
+	} else {
+		e.TileNodes = e.TileNodes[:total]
+	}
+	for ni := range e.Nodes {
+		tx0, tx1, ty0, ty1 := tileRange(e.Nodes[ni].BBox, nx, ny)
+		for ty := ty0; ty < ty1; ty++ {
+			for tx := tx0; tx < tx1; tx++ {
+				t := ty*nx + tx
+				e.TileNodes[e.tileCursor[t]] = uint32(ni)
+				e.tileCursor[t]++
+			}
+		}
+	}
+}
+
+func tileRange(bb [4]float32, nx, ny int) (tx0, tx1, ty0, ty1 int) {
+	tx0 = clampInt(int(math.Floor(float64(bb[0])))/tileSize, 0, nx)
+	tx1 = clampInt(int(math.Floor(float64(bb[2])))/tileSize+1, 0, nx)
+	ty0 = clampInt(int(math.Floor(float64(bb[1])))/tileSize, 0, ny)
+	ty1 = clampInt(int(math.Floor(float64(bb[3])))/tileSize+1, 0, ny)
+	return
+}
+
+func resetU32(s []uint32, n int) []uint32 {
+	if cap(s) < n {
+		return make([]uint32, n)
+	}
+	s = s[:n]
+	for i := range s {
+		s[i] = 0
+	}
+	return s
 }
 
 func (e *Encoded) fillPaint(nd *Node, kind PaintKind, n scene.Node) {
@@ -165,17 +208,16 @@ func strokeOutline(n scene.Node) path.Path {
 	return n.Stroke.Stroker().Stroke(src, tol)
 }
 
-func appendSegments(dst []Segment, geo path.Path, m geom.Matrix) []Segment {
-	geo.Flatten(path.DefaultTolerance, m, func(pts []geom.Point, closed bool) {
+func (e *Encoded) appendSegments(geo path.Path, m geom.Matrix) {
+	e.flatScratch = geo.FlattenInto(e.flatScratch, path.DefaultTolerance, m, func(pts []geom.Point, closed bool) {
 		if len(pts) < 2 {
 			return
 		}
 		for i := 0; i+1 < len(pts); i++ {
-			dst = append(dst, seg(pts[i], pts[i+1]))
+			e.Segments = append(e.Segments, seg(pts[i], pts[i+1]))
 		}
-		dst = append(dst, seg(pts[len(pts)-1], pts[0]))
+		e.Segments = append(e.Segments, seg(pts[len(pts)-1], pts[0]))
 	})
-	return dst
 }
 
 func appendStops(dst []Stop, stops []paint.Stop) []Stop {

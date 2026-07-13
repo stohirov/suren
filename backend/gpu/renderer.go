@@ -22,6 +22,8 @@ type Renderer struct {
 	tileOff  *wgpu.Buffer
 	tileNode *wgpu.Buffer
 	nx, ny   int
+
+	enc *Encoded
 }
 
 func NewRenderer(w, h int) (*Renderer, error) {
@@ -40,7 +42,7 @@ func NewRenderer(w, h int) (*Renderer, error) {
 		dev.Release()
 		return nil, err
 	}
-	return &Renderer{dev: dev, w: w, h: h, target: t, ras: ras}, nil
+	return &Renderer{dev: dev, w: w, h: h, target: t, ras: ras, enc: &Encoded{}}, nil
 }
 
 func (r *Renderer) Device() *Device { return r.dev }
@@ -60,8 +62,8 @@ func (r *Renderer) Resize(w, h int) error {
 }
 
 func (r *Renderer) Render(s *scene.Scene) error {
-	e := Encode(s, r.w, r.h)
-	if err := r.upload(e); err != nil {
+	EncodeInto(r.enc, s, r.w, r.h)
+	if err := r.upload(r.enc); err != nil {
 		return err
 	}
 	return r.ras.run(r.dev, r.target, r.segBuf, r.nodeBuf, r.tileOff, r.tileNode, r.stopBuf, r.nx, r.ny)

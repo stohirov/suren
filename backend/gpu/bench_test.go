@@ -26,10 +26,12 @@ func BenchmarkCPUManyNodes(b *testing.B) {
 
 func BenchmarkEncodeManyNodes(b *testing.B) {
 	s := sample.ManyNodes(benchW, benchH, 40, 24)
+	e := &Encoded{}
+	EncodeInto(e, s, benchW, benchH)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		Encode(s, benchW, benchH)
+		EncodeInto(e, s, benchW, benchH)
 	}
 }
 

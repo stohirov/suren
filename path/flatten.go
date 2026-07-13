@@ -11,7 +11,11 @@ const DefaultTolerance = 0.25
 const maxDepth = 16
 
 func (p Path) Flatten(tol float64, m geom.Matrix, emit func(pts []geom.Point, closed bool)) {
-	var buf []geom.Point
+	p.FlattenInto(nil, tol, m, emit)
+}
+
+func (p Path) FlattenInto(scratch []geom.Point, tol float64, m geom.Matrix, emit func(pts []geom.Point, closed bool)) []geom.Point {
+	buf := scratch[:0]
 	var cur geom.Point
 	flush := func(closed bool) {
 		if len(buf) >= 2 {
@@ -46,6 +50,7 @@ func (p Path) Flatten(tol float64, m geom.Matrix, emit func(pts []geom.Point, cl
 		}
 	}
 	flush(false)
+	return buf
 }
 
 func chordDist(a, b, q geom.Point) float64 {
