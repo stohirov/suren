@@ -35,10 +35,15 @@ func (r *Rasterizer) Paint(dst *image.RGBA, c color.Color, rule FillRule) {
 }
 
 func (r *Rasterizer) PaintShader(dst *image.RGBA, sh Shader, rule FillRule) {
+	r.paintShaderClip(dst, sh, rule, dst.Bounds())
+}
+
+func (r *Rasterizer) paintShaderClip(dst *image.RGBA, sh Shader, rule FillRule, clip image.Rectangle) {
 	b := dst.Bounds()
+	clip = clip.Intersect(b)
 	r.Sweep(rule, func(x, y int, cov float64) {
 		px, py := b.Min.X+x, b.Min.Y+y
-		if px >= b.Max.X || py >= b.Max.Y {
+		if !(image.Point{X: px, Y: py}).In(clip) {
 			return
 		}
 
@@ -65,14 +70,31 @@ func clamp8(v float64) uint8 {
 }
 
 func Fill(dst *image.RGBA, p path.Path, m geom.Matrix, c color.Color, rule FillRule) {
-	FillShader(dst, p, m, NewSolidShader(c), rule)
+	fillShader(dst, p, m, NewSolidShader(c), rule, false, dst.Bounds())
+}
+
+func FillBinary(dst *image.RGBA, p path.Path, m geom.Matrix, c color.Color, rule FillRule) {
+	fillShader(dst, p, m, NewSolidShader(c), rule, true, dst.Bounds())
 }
 
 func FillShader(dst *image.RGBA, p path.Path, m geom.Matrix, sh Shader, rule FillRule) {
+	fillShader(dst, p, m, sh, rule, false, dst.Bounds())
+}
+
+func FillClip(dst *image.RGBA, p path.Path, m geom.Matrix, c color.Color, rule FillRule, clip image.Rectangle) {
+	fillShader(dst, p, m, NewSolidShader(c), rule, false, clip)
+}
+
+func FillShaderClip(dst *image.RGBA, p path.Path, m geom.Matrix, sh Shader, rule FillRule, clip image.Rectangle) {
+	fillShader(dst, p, m, sh, rule, false, clip)
+}
+
+func fillShader(dst *image.RGBA, p path.Path, m geom.Matrix, sh Shader, rule FillRule, binary bool, clip image.Rectangle) {
 	b := dst.Bounds()
 	r := NewRasterizer(b.Dx(), b.Dy())
+	r.Binary = binary
 
 	shift := geom.Translate(float64(-b.Min.X), float64(-b.Min.Y)).Mul(m)
 	r.FillPath(p, path.DefaultTolerance, shift)
-	r.PaintShader(dst, sh, rule)
+	r.paintShaderClip(dst, sh, rule, clip)
 }

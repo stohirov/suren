@@ -14,9 +14,10 @@ const (
 )
 
 type Rasterizer struct {
-	w, h  int
-	cover []float64
-	area  []float64
+	w, h   int
+	cover  []float64
+	area   []float64
+	Binary bool
 }
 
 func NewRasterizer(w, h int) *Rasterizer {
@@ -111,6 +112,13 @@ func (r *Rasterizer) Sweep(rule FillRule, emit func(x, y int, alpha float64)) {
 		for x := 0; x < r.w; x++ {
 			acc += r.cover[row+x]
 			alpha := coverage(acc-r.area[row+x]/2, rule)
+			if r.Binary {
+				if alpha >= 0.5 {
+					alpha = 1
+				} else {
+					alpha = 0
+				}
+			}
 			if alpha > 0 {
 				emit(x, y, alpha)
 			}

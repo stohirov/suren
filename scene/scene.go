@@ -13,6 +13,7 @@ type Node struct {
 	Op        paint.BlendMode
 	FillRule  paint.FillRule
 	Stroke    *paint.Stroke
+	Clip      *geom.Rect
 }
 
 func (n Node) Filled() bool { return n.Stroke == nil }

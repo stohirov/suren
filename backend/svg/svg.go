@@ -20,7 +20,8 @@ func Encode(w io.Writer, s *scene.Scene, pxW, pxH int) error {
 		if !ok {
 			continue
 		}
-		writeNode(&body, n, ref)
+		clip := clipRef(n, &defs, &id)
+		writeNode(&body, n, ref, clip)
 	}
 
 	var out strings.Builder
@@ -77,7 +78,21 @@ func writeStops(b *strings.Builder, stops []paint.Stop) {
 	}
 }
 
-func writeNode(b *strings.Builder, n scene.Node, ref fillRef) {
+func clipRef(n scene.Node, defs *strings.Builder, id *int) string {
+	if n.Clip == nil {
+		return ""
+	}
+	name := fmt.Sprintf("clip%d", *id)
+	*id++
+	fmt.Fprintf(defs, `<clipPath id="%s" clipPathUnits="userSpaceOnUse"><rect x="%s" y="%s" width="%s" height="%s"/></clipPath>`+"\n",
+		name, f(n.Clip.Min.X), f(n.Clip.Min.Y), f(n.Clip.Width()), f(n.Clip.Height()))
+	return "url(#" + name + ")"
+}
+
+func writeNode(b *strings.Builder, n scene.Node, ref fillRef, clip string) {
+	if clip != "" {
+		fmt.Fprintf(b, `<g clip-path="%s">`, clip)
+	}
 	b.WriteString(`<path d="`)
 	writeData(b, n.Path)
 	b.WriteString(`"`)
@@ -90,7 +105,11 @@ func writeNode(b *strings.Builder, n scene.Node, ref fillRef) {
 	} else {
 		writeFill(b, n.FillRule, ref)
 	}
-	b.WriteString("/>\n")
+	b.WriteString("/>")
+	if clip != "" {
+		b.WriteString("</g>")
+	}
+	b.WriteString("\n")
 }
 
 func writeFill(b *strings.Builder, rule paint.FillRule, ref fillRef) {

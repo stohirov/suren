@@ -4,6 +4,7 @@ import (
 	"image"
 	stdpng "image/png"
 	"io"
+	"math"
 
 	"github.com/stohirov/sukho/geom"
 	"github.com/stohirov/sukho/paint"
@@ -28,12 +29,21 @@ func (r *Renderer) Render(s *scene.Scene) error {
 			geo = strokeOutline(n)
 			rule = raster.NonZero
 		}
+		clip, hasClip := clipRect(n.Clip)
 		if col, ok := solidColor(n.Paint); ok {
-			raster.Fill(r.Img, geo, n.Transform, col, rule)
+			if hasClip {
+				raster.FillClip(r.Img, geo, n.Transform, col, rule, clip)
+			} else {
+				raster.Fill(r.Img, geo, n.Transform, col, rule)
+			}
 			continue
 		}
 		if sh, ok := shader(n.Paint, n.Transform); ok {
-			raster.FillShader(r.Img, geo, n.Transform, sh, rule)
+			if hasClip {
+				raster.FillShaderClip(r.Img, geo, n.Transform, sh, rule, clip)
+			} else {
+				raster.FillShader(r.Img, geo, n.Transform, sh, rule)
+			}
 		}
 	}
 	return nil
@@ -66,6 +76,16 @@ func viewRect(b image.Rectangle) geom.Rect {
 		Min: geom.Pt(float64(b.Min.X), float64(b.Min.Y)),
 		Max: geom.Pt(float64(b.Max.X), float64(b.Max.Y)),
 	}
+}
+
+func clipRect(r *geom.Rect) (image.Rectangle, bool) {
+	if r == nil {
+		return image.Rectangle{}, false
+	}
+	return image.Rect(
+		int(math.Floor(r.Min.X)), int(math.Floor(r.Min.Y)),
+		int(math.Ceil(r.Max.X)), int(math.Ceil(r.Max.Y)),
+	), true
 }
 
 func culled(n scene.Node, view geom.Rect) bool {
