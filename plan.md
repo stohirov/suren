@@ -266,10 +266,18 @@ only when the scene changes; a static scene still skips upload+dispatch via 7c.
 
 ### Remaining (optional, deferred)
 
-- [ ] **Precomputed per-scanline backdrop** (full Vello coarse pass): store the winding
-      entering each tile so the fine shader lists *only* intersecting segments — drops the
-      722 k → ~O(segments) memory and the residual 180× amplification. Needs a horizontal
-      winding prefix-sum in the encoder.
+- [x] **Precomputed per-scanline backdrop** (full Vello coarse pass) — *implemented, measured,
+      reverted as a net regression.* A horizontal winding prefix-sum in the encoder produced a
+      per-(tile-entry, scanline) backdrop so the fine shader lists only intersecting segments
+      (segment refs many-segs **722 k → 174 k**, many-nodes 31 k → 21 k). Parity held exactly.
+      But it **lost on every other axis** in a same-session A/B: encode **+41 %** (many-nodes
+      748 µs → 1055 µs) / **+66 %** (many-segs 1.03 → 1.72 ms), dispatch neutral-to-worse
+      (many-nodes ~1.57 → ~2.33 ms — an extra per-entry `f32` load, a 9th storage buffer, and a
+      352 KB backdrop buffer), and it *added* net memory on typical scenes (the backdrop buffer
+      dwarfs the ref savings). Root cause: the per-tile lists already made segment scanning
+      cheap, so removing the residual left-segment scan buys almost nothing while its costs are
+      real. Kept the per-tile-lists baseline. Revisit only if a memory-bound target (huge
+      complex paths) makes segment-list bytes — not frame time — the binding constraint.
 - [ ] **Skip `buildTiles` on unchanged scene** (7c refinement): fingerprint before the tile
       build and reuse last frame's tile slices — removes the coarse-pass encode cost on static
       scenes (restores the ~0.5 ms static frame).
