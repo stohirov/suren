@@ -85,6 +85,66 @@ fn coverage(wv: f32, rule: u32) -> f32 {
   return min(a, 1.0);
 }
 
+fn hardLight(cb: f32, cs: f32) -> f32 {
+  if (cs <= 0.5) { return 2.0 * cb * cs; }
+  return cb + (2.0 * cs - 1.0) - cb * (2.0 * cs - 1.0);
+}
+
+fn softLight(cb: f32, cs: f32) -> f32 {
+  if (cs <= 0.5) { return cb - (1.0 - 2.0 * cs) * cb * (1.0 - cb); }
+  var d = sqrt(cb);
+  if (cb <= 0.25) { d = ((16.0 * cb - 12.0) * cb + 4.0) * cb; }
+  return cb + (2.0 * cs - 1.0) * (d - cb);
+}
+
+fn blendCh(mode: u32, cb: f32, cs: f32) -> f32 {
+  switch mode {
+    case 1u: { return cb * cs; }
+    case 2u: { return cb + cs - cb * cs; }
+    case 3u: { return hardLight(cs, cb); }
+    case 4u: { return min(cb, cs); }
+    case 5u: { return max(cb, cs); }
+    case 6u: {
+      if (cb <= 0.0) { return 0.0; }
+      if (cs >= 1.0) { return 1.0; }
+      return min(1.0, cb / (1.0 - cs));
+    }
+    case 7u: {
+      if (cb >= 1.0) { return 1.0; }
+      if (cs <= 0.0) { return 0.0; }
+      return 1.0 - min(1.0, (1.0 - cb) / cs);
+    }
+    case 8u: { return hardLight(cb, cs); }
+    case 9u: { return softLight(cb, cs); }
+    case 10u: { return abs(cb - cs); }
+    case 11u: { return cb + cs - 2.0 * cb * cs; }
+    default: { return cs; }
+  }
+}
+
+fn composite(mode: u32, dst: vec4<f32>, src: vec4<f32>, alpha: f32) -> vec4<f32> {
+  let fa = src.w * alpha;
+  if (mode == 0u) {
+    let invc = 1.0 - fa;
+    return vec4<f32>(src.x * alpha + dst.x * invc,
+                     src.y * alpha + dst.y * invc,
+                     src.z * alpha + dst.z * invc,
+                     fa + dst.w * invc);
+  }
+  let sA = fa;
+  let bA = dst.w;
+  var cs = vec3<f32>(0.0);
+  if (src.w > 0.0) { cs = src.xyz / src.w; }
+  var cb = vec3<f32>(0.0);
+  if (bA > 0.0) { cb = dst.xyz / bA; }
+  let bl = vec3<f32>(blendCh(mode, cb.x, cs.x),
+                     blendCh(mode, cb.y, cs.y),
+                     blendCh(mode, cb.z, cs.z));
+  let co = sA * (1.0 - bA) * cs + sA * bA * bl + (1.0 - sA) * bA * cb;
+  let ao = sA + bA * (1.0 - sA);
+  return vec4<f32>(co, ao);
+}
+
 fn routeCol(col: i32, dcov: f32, dar: f32, X0: i32,
             cov: ptr<function, array<f32, 16>>,
             ar: ptr<function, array<f32, 16>>,
@@ -203,14 +263,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (nd.kind != 0u) {
           src = gradColor(nd, f32(gx) + 0.5, f32(y) + 0.5);
         }
-        let dst = fbl[lx];
-        let invc = 1.0 - src.w * alpha;
-        fbl[lx] = vec4<f32>(
-          src.x * alpha + dst.x * invc,
-          src.y * alpha + dst.y * invc,
-          src.z * alpha + dst.z * invc,
-          src.w * alpha + dst.w * invc,
-        );
+        fbl[lx] = composite(nd.flags, fbl[lx], src, alpha);
       }
     }
   }

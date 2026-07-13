@@ -113,6 +113,17 @@ func ManySegments(w, h, spikes int) *scene.Scene {
 	return c.Scene()
 }
 
+func BlendScene(op paint.BlendMode) *scene.Scene {
+	s := &scene.Scene{}
+	solid := func(p path.Path, c paint.Color, blend paint.BlendMode) {
+		s.Add(scene.Node{Path: p, Transform: geom.Identity(), Paint: paint.Solid{Color: c}, Op: blend, FillRule: paint.NonZero})
+	}
+	solid(path.Rect(geom.RectXYWH(0, 0, W*0.7, H)), paint.RGBA(0.12, 0.16, 0.28, 0.85), paint.SrcOver)
+	solid(path.Circle(geom.Pt(W*0.35, H*0.5), H*0.32), paint.FromRGBA8(240, 200, 60, 255), paint.SrcOver)
+	solid(path.Circle(geom.Pt(W*0.62, H*0.5), H*0.36), paint.RGBA(0.20, 0.72, 0.90, 0.7), op)
+	return s
+}
+
 func appendPath(dst *path.Path, src path.Path) {
 	it := src.Iter()
 	for {

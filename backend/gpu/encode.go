@@ -102,6 +102,7 @@ func EncodeInto(e *Encoded, s *scene.Scene, w, h int) {
 			SegCount: uint32(len(e.Segments)) - start,
 			Rule:     rule,
 			Kind:     uint32(kind),
+			Flags:    uint32(n.Op),
 			BBox:     segBounds(e.Segments[start:]),
 		}
 		e.fillPaint(&nd, kind, n)

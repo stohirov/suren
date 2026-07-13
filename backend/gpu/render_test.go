@@ -24,6 +24,10 @@ func TestDeviceInit(t *testing.T) {
 }
 
 func parity(t *testing.T, want *image.RGBA, sc *scene.Scene) {
+	parityTol(t, want, sc, 2)
+}
+
+func parityTol(t *testing.T, want *image.RGBA, sc *scene.Scene, tol int) {
 	t.Helper()
 	r, err := NewRenderer(want.Rect.Dx(), want.Rect.Dy())
 	if err != nil {
@@ -48,13 +52,13 @@ func parity(t *testing.T, want *image.RGBA, sc *scene.Scene) {
 		if d > maxd {
 			maxd = d
 		}
-		if d > 2 {
+		if d > tol {
 			over++
 		}
 	}
-	t.Logf("max channel delta=%d, channels off-by->2: %d/%d", maxd, over, len(want.Pix))
-	if maxd > 2 {
-		t.Fatalf("gpu/cpu mismatch: max channel delta=%d (want <=2)", maxd)
+	t.Logf("max channel delta=%d, channels off-by->%d: %d/%d", maxd, tol, over, len(want.Pix))
+	if maxd > tol {
+		t.Fatalf("gpu/cpu mismatch: max channel delta=%d (want <=%d)", maxd, tol)
 	}
 }
 
@@ -69,6 +73,32 @@ func TestParityManyNodes(t *testing.T) {
 
 func TestParityGradient(t *testing.T) {
 	parity(t, cpu.Render(sample.GradientScene(), sample.W, sample.H), sample.GradientScene())
+}
+
+func TestParityBlendModes(t *testing.T) {
+	modes := []struct {
+		name string
+		op   paint.BlendMode
+		tol  int
+	}{
+		{"SrcOver", paint.SrcOver, 2},
+		{"Multiply", paint.Multiply, 2},
+		{"Screen", paint.Screen, 2},
+		{"Overlay", paint.Overlay, 2},
+		{"Darken", paint.Darken, 2},
+		{"Lighten", paint.Lighten, 2},
+		{"ColorDodge", paint.ColorDodge, 3},
+		{"ColorBurn", paint.ColorBurn, 3},
+		{"HardLight", paint.HardLight, 2},
+		{"SoftLight", paint.SoftLight, 2},
+		{"Difference", paint.Difference, 2},
+		{"Exclusion", paint.Exclusion, 2},
+	}
+	for _, m := range modes {
+		t.Run(m.name, func(t *testing.T) {
+			parityTol(t, cpu.Render(sample.BlendScene(m.op), sample.W, sample.H), sample.BlendScene(m.op), m.tol)
+		})
+	}
 }
 
 func TestParityManySegments(t *testing.T) {

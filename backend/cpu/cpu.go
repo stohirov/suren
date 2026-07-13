@@ -46,7 +46,7 @@ func (r *Renderer) Render(s *scene.Scene) error {
 		if c, ok := clipRect(n.Clip); ok {
 			clip = c
 		}
-		r.ras.FillPaint(r.Img, geo, n.Transform, sh, rule, clip)
+		r.ras.FillPaint(r.Img, geo, n.Transform, sh, rule, clip, raster.BlendMode(n.Op))
 	}
 	return nil
 }

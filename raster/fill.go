@@ -47,23 +47,104 @@ func (r *Rasterizer) paintShaderClip(dst *image.RGBA, sh Shader, rule FillRule, 
 		if !(image.Point{X: px, Y: py}).In(clip) {
 			return
 		}
-		blend(dst, px, py, sh, cov)
+		blend(dst, px, py, sh, cov, SrcOver)
 	})
 }
 
-func blend(dst *image.RGBA, px, py int, sh Shader, cov float64) {
+func blend(dst *image.RGBA, px, py int, sh Shader, cov float64, mode BlendMode) {
 	sr, sg, sb, sa := sh.RGBA(px, py)
 	fa := sa * cov
-	inv := 1 - fa/255
+	if fa <= 0 {
+		return
+	}
 	i := dst.PixOffset(px, py)
 	s := dst.Pix[i : i+4 : i+4]
-	s[0] = clamp8(sr*cov + float64(s[0])*inv)
-	s[1] = clamp8(sg*cov + float64(s[1])*inv)
-	s[2] = clamp8(sb*cov + float64(s[2])*inv)
-	s[3] = clamp8(fa + float64(s[3])*inv)
+	if mode == SrcOver {
+		inv := 1 - fa/255
+		s[0] = clamp8(sr*cov + float64(s[0])*inv)
+		s[1] = clamp8(sg*cov + float64(s[1])*inv)
+		s[2] = clamp8(sb*cov + float64(s[2])*inv)
+		s[3] = clamp8(fa + float64(s[3])*inv)
+		return
+	}
+
+	as := fa / 255
+	ab := float64(s[3]) / 255
+	csr, csg, csb := sr/sa, sg/sa, sb/sa
+	var cbr, cbg, cbb float64
+	if s[3] > 0 {
+		cbr = float64(s[0]) / float64(s[3])
+		cbg = float64(s[1]) / float64(s[3])
+		cbb = float64(s[2]) / float64(s[3])
+	}
+	w1, w2, w3 := as*(1-ab), as*ab, (1-as)*ab
+	s[0] = clamp8((w1*csr + w2*blendCh(mode, cbr, csr) + w3*cbr) * 255)
+	s[1] = clamp8((w1*csg + w2*blendCh(mode, cbg, csg) + w3*cbg) * 255)
+	s[2] = clamp8((w1*csb + w2*blendCh(mode, cbb, csb) + w3*cbb) * 255)
+	s[3] = clamp8((as + ab*(1-as)) * 255)
 }
 
-func (r *Rasterizer) FillPaint(dst *image.RGBA, p path.Path, m geom.Matrix, sh Shader, rule FillRule, clip image.Rectangle) {
+func blendCh(mode BlendMode, cb, cs float64) float64 {
+	switch mode {
+	case Multiply:
+		return cb * cs
+	case Screen:
+		return cb + cs - cb*cs
+	case Overlay:
+		return hardLight(cs, cb)
+	case Darken:
+		return math.Min(cb, cs)
+	case Lighten:
+		return math.Max(cb, cs)
+	case ColorDodge:
+		if cb <= 0 {
+			return 0
+		}
+		if cs >= 1 {
+			return 1
+		}
+		return math.Min(1, cb/(1-cs))
+	case ColorBurn:
+		if cb >= 1 {
+			return 1
+		}
+		if cs <= 0 {
+			return 0
+		}
+		return 1 - math.Min(1, (1-cb)/cs)
+	case HardLight:
+		return hardLight(cb, cs)
+	case SoftLight:
+		return softLight(cb, cs)
+	case Difference:
+		return math.Abs(cb - cs)
+	case Exclusion:
+		return cb + cs - 2*cb*cs
+	}
+	return cs
+}
+
+func hardLight(cb, cs float64) float64 {
+	if cs <= 0.5 {
+		return 2 * cb * cs
+	}
+	return cb + (2*cs - 1) - cb*(2*cs-1)
+}
+
+func softLight(cb, cs float64) float64 {
+	if cs <= 0.5 {
+		return cb - (1-2*cs)*cb*(1-cb)
+	}
+	var d float64
+	if cb <= 0.25 {
+		d = ((16*cb-12)*cb + 4) * cb
+	} else {
+		d = math.Sqrt(cb)
+	}
+	return cb + (2*cs-1)*(d-cb)
+}
+
+func (r *Rasterizer) FillPaint(dst *image.RGBA, p path.Path, m geom.Matrix, sh Shader, rule FillRule, clip image.Rectangle, mode BlendMode) {
 	if r.w == 0 || r.h == 0 {
 		return
 	}
@@ -104,7 +185,7 @@ func (r *Rasterizer) FillPaint(dst *image.RGBA, p path.Path, m geom.Matrix, sh S
 				}
 			}
 			if alpha > 0 {
-				blend(dst, b.Min.X+x, b.Min.Y+y, sh, alpha)
+				blend(dst, b.Min.X+x, b.Min.Y+y, sh, alpha, mode)
 			}
 		}
 	}

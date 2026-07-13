@@ -14,6 +14,17 @@ type BlendMode uint8
 
 const (
 	SrcOver BlendMode = iota
+	Multiply
+	Screen
+	Overlay
+	Darken
+	Lighten
+	ColorDodge
+	ColorBurn
+	HardLight
+	SoftLight
+	Difference
+	Exclusion
 )
 
 type Color struct {

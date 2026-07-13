@@ -12,8 +12,9 @@ type Renderer interface {
 }
 
 type state struct {
-	ctm  geom.Matrix
-	clip *geom.Rect
+	ctm   geom.Matrix
+	clip  *geom.Rect
+	blend paint.BlendMode
 }
 
 type Canvas struct {
@@ -43,6 +44,8 @@ func (c *Canvas) Rotate(theta float64)     { c.Transform(geom.Rotate(theta)) }
 
 func (c *Canvas) CTM() geom.Matrix { return c.st.ctm }
 
+func (c *Canvas) SetBlend(mode paint.BlendMode) { c.st.blend = mode }
+
 func (c *Canvas) ClipRect(r geom.Rect) {
 	d := deviceBBox(c.st.ctm, r)
 	if c.st.clip != nil {
@@ -70,6 +73,7 @@ func (c *Canvas) Fill(p path.Path, pt paint.Paint, rule paint.FillRule) {
 		Path:      p,
 		Transform: c.st.ctm,
 		Paint:     pt,
+		Op:        c.st.blend,
 		FillRule:  rule,
 		Clip:      c.st.clip,
 	})
@@ -85,6 +89,7 @@ func (c *Canvas) Stroke(p path.Path, pt paint.Paint, s paint.Stroke) {
 		Path:      p,
 		Transform: c.st.ctm,
 		Paint:     pt,
+		Op:        c.st.blend,
 		Stroke:    &sc,
 		Clip:      c.st.clip,
 	})
