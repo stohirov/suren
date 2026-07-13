@@ -24,6 +24,8 @@ const TILE: i32 = 16;
 @group(0) @binding(4) var<storage, read> tileOffsets: array<u32>;
 @group(0) @binding(5) var<storage, read> tileNodes: array<u32>;
 @group(0) @binding(6) var<storage, read> stops: array<Stop>;
+@group(0) @binding(7) var<storage, read> tileSegOff: array<u32>;
+@group(0) @binding(8) var<storage, read> tileSegIdx: array<u32>;
 
 fn interpStops(start: u32, count: u32, t: f32) -> vec4<f32> {
   if (count == 0u) { return vec4<f32>(0.0); }
@@ -182,9 +184,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var i = 0; i < TILE; i = i + 1) { cov[i] = 0.0; ar[i] = 0.0; }
     var backdrop = 0.0;
 
-    let s1 = nd.segStart + nd.segCount;
-    for (var si = nd.segStart; si < s1; si = si + 1u) {
-      routeSeg(segs[si], y, X0, W, &cov, &ar, &backdrop);
+    let so0 = tileSegOff[k];
+    let so1 = tileSegOff[k + 1u];
+    for (var j = so0; j < so1; j = j + 1u) {
+      routeSeg(segs[tileSegIdx[j]], y, X0, W, &cov, &ar, &backdrop);
     }
 
     let clx0 = max(0, i32(floor(nd.clx0)));

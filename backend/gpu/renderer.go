@@ -16,12 +16,14 @@ type Renderer struct {
 	target *target
 	ras    *rasterizer
 
-	segBuf   *wgpu.Buffer
-	nodeBuf  *wgpu.Buffer
-	stopBuf  *wgpu.Buffer
-	tileOff  *wgpu.Buffer
-	tileNode *wgpu.Buffer
-	nx, ny   int
+	segBuf    *wgpu.Buffer
+	nodeBuf   *wgpu.Buffer
+	stopBuf   *wgpu.Buffer
+	tileOff   *wgpu.Buffer
+	tileNode  *wgpu.Buffer
+	tileSegOf *wgpu.Buffer
+	tileSegIx *wgpu.Buffer
+	nx, ny    int
 
 	enc        *Encoded
 	lastFP     uint64
@@ -73,7 +75,7 @@ func (r *Renderer) Render(s *scene.Scene) error {
 	if err := r.upload(r.enc); err != nil {
 		return err
 	}
-	if err := r.ras.run(r.dev, r.target, r.segBuf, r.nodeBuf, r.tileOff, r.tileNode, r.stopBuf, r.nx, r.ny); err != nil {
+	if err := r.ras.run(r.dev, r.target, r.segBuf, r.nodeBuf, r.tileOff, r.tileNode, r.stopBuf, r.tileSegOf, r.tileSegIx, r.nx, r.ny); err != nil {
 		return err
 	}
 	r.lastFP = r.enc.Fingerprint
@@ -104,6 +106,12 @@ func (r *Renderer) upload(e *Encoded) error {
 		return err
 	}
 	if err := r.storage(&r.tileNode, wgpu.ToBytes(e.TileNodes)); err != nil {
+		return err
+	}
+	if err := r.storage(&r.tileSegOf, wgpu.ToBytes(e.TileSegOff)); err != nil {
+		return err
+	}
+	if err := r.storage(&r.tileSegIx, wgpu.ToBytes(e.TileSegIdx)); err != nil {
 		return err
 	}
 	return nil
@@ -139,7 +147,7 @@ func (r *Renderer) storage(buf **wgpu.Buffer, data []byte) error {
 }
 
 func (r *Renderer) releaseBuffers() {
-	for _, b := range []**wgpu.Buffer{&r.segBuf, &r.nodeBuf, &r.stopBuf, &r.tileOff, &r.tileNode} {
+	for _, b := range []**wgpu.Buffer{&r.segBuf, &r.nodeBuf, &r.stopBuf, &r.tileOff, &r.tileNode, &r.tileSegOf, &r.tileSegIx} {
 		if *b != nil {
 			(*b).Release()
 			*b = nil

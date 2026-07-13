@@ -56,10 +56,15 @@ type Encoded struct {
 	Stops         []Stop
 	TileOffsets   []uint32
 	TileNodes     []uint32
+	TileSegOff    []uint32
+	TileSegIdx    []uint32
 	Fingerprint   uint64
 
 	flatScratch []geom.Point
 	tileCursor  []uint32
+	rankCursor  []uint32
+	entryOf     []uint32
+	segCursor   []uint32
 }
 
 func Encode(s *scene.Scene, w, h int) *Encoded {
@@ -105,7 +110,7 @@ func EncodeInto(e *Encoded, s *scene.Scene, w, h int) {
 	}
 	e.NTilesX = (w + tileSize - 1) / tileSize
 	e.NTilesY = (h + tileSize - 1) / tileSize
-	e.buildTileBins()
+	e.buildTiles()
 	e.Fingerprint = e.fingerprint()
 }
 
@@ -136,12 +141,11 @@ func hashWords(fp uint64, p unsafe.Pointer, n int) uint64 {
 	return fp
 }
 
-func (e *Encoded) buildTileBins() {
+func (e *Encoded) buildTiles() {
 	nx, ny := e.NTilesX, e.NTilesY
 	nt := nx * ny
-	e.TileOffsets = resetU32(e.TileOffsets, nt+1)
-	e.tileCursor = resetU32(e.tileCursor, nt)
 
+	e.TileOffsets = resetU32(e.TileOffsets, nt+1)
 	for ni := range e.Nodes {
 		tx0, tx1, ty0, ty1 := tileRange(e.Nodes[ni].BBox, nx, ny)
 		for ty := ty0; ty < ty1; ty++ {
@@ -153,14 +157,11 @@ func (e *Encoded) buildTileBins() {
 	for i := 1; i <= nt; i++ {
 		e.TileOffsets[i] += e.TileOffsets[i-1]
 	}
-	copy(e.tileCursor, e.TileOffsets[:nt])
+	numEntries := int(e.TileOffsets[nt])
 
-	total := int(e.TileOffsets[nt])
-	if cap(e.TileNodes) < total {
-		e.TileNodes = make([]uint32, total)
-	} else {
-		e.TileNodes = e.TileNodes[:total]
-	}
+	e.tileCursor = growU32(e.tileCursor, nt)
+	copy(e.tileCursor, e.TileOffsets[:nt])
+	e.TileNodes = growU32(e.TileNodes, numEntries)
 	for ni := range e.Nodes {
 		tx0, tx1, ty0, ty1 := tileRange(e.Nodes[ni].BBox, nx, ny)
 		for ty := ty0; ty < ty1; ty++ {
@@ -169,6 +170,58 @@ func (e *Encoded) buildTileBins() {
 				e.TileNodes[e.tileCursor[t]] = uint32(ni)
 				e.tileCursor[t]++
 			}
+		}
+	}
+
+	e.TileSegOff = resetU32(e.TileSegOff, numEntries+1)
+	e.entryOf = growU32(e.entryOf, nt)
+	e.rankCursor = resetU32(e.rankCursor, nt)
+	for ni := range e.Nodes {
+		nd := &e.Nodes[ni]
+		ntx0, ntx1, nty0, nty1 := tileRange(nd.BBox, nx, ny)
+		e.assignEntries(nx, ntx0, ntx1, nty0, nty1)
+		s1 := nd.SegStart + nd.SegCount
+		for si := nd.SegStart; si < s1; si++ {
+			stx0, stx1, sty0, sty1 := segTiles(e.Segments[si], ntx0, ntx1, nty0, nty1)
+			for ty := sty0; ty < sty1; ty++ {
+				for tx := stx0; tx < stx1; tx++ {
+					e.TileSegOff[e.entryOf[ty*nx+tx]+1]++
+				}
+			}
+		}
+	}
+	for i := 1; i <= numEntries; i++ {
+		e.TileSegOff[i] += e.TileSegOff[i-1]
+	}
+
+	e.TileSegIdx = growU32(e.TileSegIdx, int(e.TileSegOff[numEntries]))
+	e.segCursor = growU32(e.segCursor, numEntries)
+	copy(e.segCursor, e.TileSegOff[:numEntries])
+	e.rankCursor = resetU32(e.rankCursor, nt)
+	for ni := range e.Nodes {
+		nd := &e.Nodes[ni]
+		ntx0, ntx1, nty0, nty1 := tileRange(nd.BBox, nx, ny)
+		e.assignEntries(nx, ntx0, ntx1, nty0, nty1)
+		s1 := nd.SegStart + nd.SegCount
+		for si := nd.SegStart; si < s1; si++ {
+			stx0, stx1, sty0, sty1 := segTiles(e.Segments[si], ntx0, ntx1, nty0, nty1)
+			for ty := sty0; ty < sty1; ty++ {
+				for tx := stx0; tx < stx1; tx++ {
+					k := e.entryOf[ty*nx+tx]
+					e.TileSegIdx[e.segCursor[k]] = si
+					e.segCursor[k]++
+				}
+			}
+		}
+	}
+}
+
+func (e *Encoded) assignEntries(nx, tx0, tx1, ty0, ty1 int) {
+	for ty := ty0; ty < ty1; ty++ {
+		for tx := tx0; tx < tx1; tx++ {
+			t := ty*nx + tx
+			e.entryOf[t] = e.TileOffsets[t] + e.rankCursor[t]
+			e.rankCursor[t]++
 		}
 	}
 }
@@ -181,15 +234,30 @@ func tileRange(bb [4]float32, nx, ny int) (tx0, tx1, ty0, ty1 int) {
 	return
 }
 
+func segTiles(s Segment, ntx0, ntx1, nty0, nty1 int) (tx0, tx1, ty0, ty1 int) {
+	minx := math.Min(float64(s.X0), float64(s.X1))
+	miny := math.Min(float64(s.Y0), float64(s.Y1))
+	maxy := math.Max(float64(s.Y0), float64(s.Y1))
+	tx0 = clampInt(int(math.Floor(minx))/tileSize, ntx0, ntx1)
+	tx1 = ntx1
+	ty0 = clampInt(int(math.Floor(miny))/tileSize, nty0, nty1)
+	ty1 = clampInt(int(math.Floor(maxy))/tileSize+1, nty0, nty1)
+	return
+}
+
 func resetU32(s []uint32, n int) []uint32 {
-	if cap(s) < n {
-		return make([]uint32, n)
-	}
-	s = s[:n]
+	s = growU32(s, n)
 	for i := range s {
 		s[i] = 0
 	}
 	return s
+}
+
+func growU32(s []uint32, n int) []uint32 {
+	if cap(s) < n {
+		return make([]uint32, n)
+	}
+	return s[:n]
 }
 
 func (e *Encoded) fillPaint(nd *Node, kind PaintKind, n scene.Node) {

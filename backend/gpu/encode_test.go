@@ -48,6 +48,29 @@ func TestEncodeGradientScene(t *testing.T) {
 	}
 }
 
+func TestEncodeTileSegLists(t *testing.T) {
+	e := Encode(sample.ManySegments(320, 240, 200), 320, 240)
+	entries := len(e.TileNodes)
+	if len(e.TileSegOff) != entries+1 {
+		t.Fatalf("TileSegOff len = %d, want entries+1 = %d", len(e.TileSegOff), entries+1)
+	}
+	if int(e.TileSegOff[entries]) != len(e.TileSegIdx) {
+		t.Fatalf("TileSegOff tail = %d, want len(TileSegIdx) = %d", e.TileSegOff[entries], len(e.TileSegIdx))
+	}
+	for k := 0; k < entries; k++ {
+		if e.TileSegOff[k] > e.TileSegOff[k+1] {
+			t.Fatalf("TileSegOff not monotonic at %d", k)
+		}
+		nd := e.Nodes[e.TileNodes[k]]
+		for j := e.TileSegOff[k]; j < e.TileSegOff[k+1]; j++ {
+			si := e.TileSegIdx[j]
+			if si < nd.SegStart || si >= nd.SegStart+nd.SegCount {
+				t.Fatalf("entry %d lists segment %d outside node range [%d,+%d)", k, si, nd.SegStart, nd.SegCount)
+			}
+		}
+	}
+}
+
 func TestEncodeClipFlag(t *testing.T) {
 	e := Encode(sample.Scene(), sample.W, sample.H)
 	for i, n := range e.Nodes {

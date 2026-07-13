@@ -50,7 +50,7 @@ func newRasterizer(d *Device, w, h int) (*rasterizer, error) {
 	}, nil
 }
 
-func (r *rasterizer) run(d *Device, t *target, segs, nodes, tileOff, tileNodes, stops *wgpu.Buffer, nx, ny int) error {
+func (r *rasterizer) run(d *Device, t *target, segs, nodes, tileOff, tileNodes, stops, tileSegOff, tileSegIdx *wgpu.Buffer, nx, ny int) error {
 	dims := [4]uint32{uint32(r.w), uint32(r.h), uint32(nx), uint32(ny)}
 	if err := d.queue.WriteBuffer(r.uniform, 0, unsafe.Slice((*byte)(unsafe.Pointer(&dims[0])), 16)); err != nil {
 		return err
@@ -66,6 +66,8 @@ func (r *rasterizer) run(d *Device, t *target, segs, nodes, tileOff, tileNodes, 
 			{Binding: 4, Buffer: tileOff, Size: tileOff.GetSize()},
 			{Binding: 5, Buffer: tileNodes, Size: tileNodes.GetSize()},
 			{Binding: 6, Buffer: stops, Size: stops.GetSize()},
+			{Binding: 7, Buffer: tileSegOff, Size: tileSegOff.GetSize()},
+			{Binding: 8, Buffer: tileSegIdx, Size: tileSegIdx.GetSize()},
 		},
 	})
 	if err != nil {

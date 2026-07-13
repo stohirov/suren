@@ -27,7 +27,7 @@ func benchDispatch(b *testing.B, s *scene.Scene) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if err := r.ras.run(r.dev, r.target, r.segBuf, r.nodeBuf, r.tileOff, r.tileNode, r.stopBuf, r.nx, r.ny); err != nil {
+		if err := r.ras.run(r.dev, r.target, r.segBuf, r.nodeBuf, r.tileOff, r.tileNode, r.stopBuf, r.tileSegOf, r.tileSegIx, r.nx, r.ny); err != nil {
 			b.Fatal(err)
 		}
 		r.Sync()
@@ -42,18 +42,31 @@ func BenchmarkGPUDispatchManyNodes(b *testing.B) {
 	benchDispatch(b, sample.ManyNodes(benchW, benchH, 40, 24))
 }
 
+func BenchmarkEncodeManySegments(b *testing.B) {
+	s := sample.ManySegments(benchW, benchH, benchSpikes)
+	e := &Encoded{}
+	EncodeInto(e, s, benchW, benchH)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		EncodeInto(e, s, benchW, benchH)
+	}
+}
+
 func TestPhase8Redundancy(t *testing.T) {
 	report := func(name string, s *scene.Scene) {
 		e := Encode(s, benchW, benchH)
-		scans := 0
+		naive := 0
 		for ni := range e.Nodes {
 			tx0, tx1, ty0, ty1 := tileRange(e.Nodes[ni].BBox, e.NTilesX, e.NTilesY)
-			cols := tx1 - tx0
-			rows := min(benchH, ty1*tileSize) - ty0*tileSize
-			scans += int(e.Nodes[ni].SegCount) * cols * rows
+			naive += int(e.Nodes[ni].SegCount) * (tx1 - tx0) * (min(benchH, ty1*tileSize) - ty0*tileSize)
 		}
-		t.Logf("%-12s nodes=%d segs=%d segment-scans=%d amplification=%.1fx",
-			name, len(e.Nodes), len(e.Segments), scans, float64(scans)/float64(len(e.Segments)))
+		coarse := len(e.TileSegIdx)
+		t.Logf("%-12s nodes=%d segs=%d  naive-scans=%d (%.0fx)  coarse-refs=%d (%.1fx)  reduction=%.0fx",
+			name, len(e.Nodes), len(e.Segments),
+			naive, float64(naive)/float64(len(e.Segments)),
+			coarse, float64(coarse)/float64(len(e.Segments)),
+			float64(naive)/float64(coarse))
 	}
 	report("many-nodes", sample.ManyNodes(benchW, benchH, 40, 24))
 	report("many-segs", sample.ManySegments(benchW, benchH, benchSpikes))
