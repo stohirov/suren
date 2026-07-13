@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"log"
 	"math"
 	"time"
@@ -18,10 +19,20 @@ const (
 )
 
 func main() {
+	useGPU := flag.Bool("gpu", false, "render with the GPU backend")
+	flag.Parse()
+
 	start := time.Now()
 	center := geom.Pt(w/2, h/2)
 
-	err := window.Run("sukho — interactive", w, h, func(c *render.Canvas) {
+	run := window.Run
+	title := "sukho — interactive (cpu)"
+	if *useGPU {
+		run = window.RunGPU
+		title = "sukho — interactive (gpu)"
+	}
+
+	err := run(title, w, h, func(c *render.Canvas) {
 		t := time.Since(start).Seconds()
 
 		c.FillColor(path.Rect(geom.RectXYWH(0, 0, w, h)), paint.FromRGBA8(20, 22, 28, 255))

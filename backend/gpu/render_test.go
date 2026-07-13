@@ -71,6 +71,53 @@ func TestParityGradient(t *testing.T) {
 	parity(t, cpu.Render(sample.GradientScene(), sample.W, sample.H), sample.GradientScene())
 }
 
+func TestResizeParity(t *testing.T) {
+	const w0, h0 = 96, 96
+	const w1, h1 = 200, 140
+	r, err := NewRenderer(w0, h0)
+	if err != nil {
+		t.Skipf("no gpu device: %v", err)
+	}
+	defer r.Release()
+
+	if err := r.Render(clipScene()); err != nil {
+		t.Fatalf("render at initial size: %v", err)
+	}
+
+	if err := r.Resize(w1, h1); err != nil {
+		t.Fatalf("resize: %v", err)
+	}
+	if gw, gh := r.Size(); gw != w1 || gh != h1 {
+		t.Fatalf("size after resize = %dx%d, want %dx%d", gw, gh, w1, h1)
+	}
+	if err := r.Render(sample.ManyNodes(w1, h1, 12, 8)); err != nil {
+		t.Fatalf("render after resize: %v", err)
+	}
+	got, err := r.ReadRGBA()
+	if err != nil {
+		t.Fatalf("readback: %v", err)
+	}
+	if got.Rect.Dx() != w1 || got.Rect.Dy() != h1 {
+		t.Fatalf("readback size = %v, want %dx%d", got.Rect, w1, h1)
+	}
+
+	want := cpu.Render(sample.ManyNodes(w1, h1, 12, 8), w1, h1)
+	maxd := 0
+	for i := range want.Pix {
+		d := int(got.Pix[i]) - int(want.Pix[i])
+		if d < 0 {
+			d = -d
+		}
+		if d > maxd {
+			maxd = d
+		}
+	}
+	t.Logf("post-resize max channel delta=%d", maxd)
+	if maxd > 2 {
+		t.Fatalf("gpu/cpu mismatch after resize: max channel delta=%d", maxd)
+	}
+}
+
 func clipScene() *scene.Scene {
 	c := render.NewCanvas()
 	c.FillColor(path.Rect(geom.RectXYWH(0, 0, 96, 96)), paint.FromRGBA8(30, 30, 40, 255))

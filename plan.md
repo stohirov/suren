@@ -142,24 +142,29 @@ Phase 9 (GPU flatten/stroke) ── gated on Phase 8 diagnosis: only if CPU enco
 Phase 10 (feature parity: blend modes, path clips) ── touches BOTH cpu + gpu + wgsl
 ```
 
-## Phase 6 — windowed present (real-time on screen)  ⏳ next
+## Phase 6 — windowed present (real-time on screen)  ⏳ in progress
 
 The whole motivation was the CPU window's ~14 ms/frame. The GPU renders offscreen today;
 this phase puts it on a live surface. Ship in two steps so a regression is visible early.
 
-### 6a — interim bridge through the existing Ebiten window
+### 6a — interim bridge through the existing Ebiten window  ✅
 
-- [ ] Add a `gpu`-backed variant of `backend/window`: per frame, `Render(scene)` →
-      `Sync()` → `ReadRGBA()` → `screen.WritePixels`. No new cgo dep, no display-surface
-      code — reuses the proven readback path (`target.readRGBA`, `align256`).
-- [ ] Extend `game.logTiming` to label CPU vs GPU so the two backends compare in one run.
-- [ ] Add `target.resize(d, w, h)` + `rasterizer` w/h update so a window resize
-      reallocates the storage texture, readback buffer, and dims uniform (today
-      `NewRenderer(w,h)` fixes size). Wire `Renderer.Resize(w,h)`.
+- [x] `window.RunGPU`: a `gpu`-backed `backend` alongside the CPU one, sharing the loop.
+      Per frame `Render(scene)` → `Sync()` → `ReadRGBA()` → `screen.WritePixels`; reuses
+      the proven readback path (`target.readRGBA`, `align256`). `backend/window` now
+      requires the quarantined `backend/gpu` module (`replace ../gpu`).
+- [x] `logTiming` labels the active backend (`cpu raster` / `gpu raster`) so the two
+      compare in one run; example takes a `-gpu` flag to pick the backend.
+- [x] `target.resize` + `Renderer.Resize(w,h)` (rasterizer w/h + dims uniform) reallocate
+      the storage texture and readback buffer on window resize; `Layout` drives it and the
+      CPU backend reallocates its `image.RGBA` in lockstep. `TestResizeParity` (gpu, Δ=0
+      after resize) + `TestBackendParityAndResize` (window: cpu vs gpu backend, initial and
+      post-resize, Δ≤2) verify it headlessly since the sandbox has no display.
 
-**Done when:** the sample scene animates in a window driven by the GPU renderer; per-frame
-time logged and compared against the CPU backend. Accepts one GPU→CPU→GPU roundtrip (the
-readback) — removed in 6b.
+**Result:** GPU renderer drives a window via the readback bridge; CPU/GPU backends produce
+matching pixels through the exact `frame`/`resize` code the loop calls. Live per-frame
+comparison and the display itself are on-device (the sandbox has no GL context). Accepts
+one GPU→CPU→GPU roundtrip — removed in 6b.
 
 ### 6b — native wgpu surface present (`present.go`, on-device)
 

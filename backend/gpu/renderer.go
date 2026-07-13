@@ -45,6 +45,20 @@ func NewRenderer(w, h int) (*Renderer, error) {
 
 func (r *Renderer) Device() *Device { return r.dev }
 
+func (r *Renderer) Size() (w, h int) { return r.w, r.h }
+
+func (r *Renderer) Resize(w, h int) error {
+	if r.w == w && r.h == h {
+		return nil
+	}
+	if err := r.target.resize(r.dev, w, h); err != nil {
+		return err
+	}
+	r.w, r.h = w, h
+	r.ras.w, r.ras.h = w, h
+	return nil
+}
+
 func (r *Renderer) Render(s *scene.Scene) error {
 	e := Encode(s, r.w, r.h)
 	if err := r.upload(e); err != nil {

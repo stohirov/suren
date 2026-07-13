@@ -93,6 +93,19 @@ func (t *target) readRGBA(d *Device) (*image.RGBA, error) {
 	return img, nil
 }
 
+func (t *target) resize(d *Device, w, h int) error {
+	if t.w == w && t.h == h {
+		return nil
+	}
+	nt, err := newTarget(d, w, h)
+	if err != nil {
+		return err
+	}
+	t.release()
+	*t = *nt
+	return nil
+}
+
 func (t *target) release() {
 	if t.readbuf != nil {
 		t.readbuf.Release()
