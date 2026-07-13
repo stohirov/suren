@@ -1,6 +1,8 @@
 # example program outputs (goldens live in testdata/ and are committed)
 /*.png
 /*.svg
+/examples/*/*.png
+/examples/*/*.svg
 .idea/
 plan.md
 .claude
