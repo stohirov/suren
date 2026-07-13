@@ -87,6 +87,32 @@ func ManyNodes(w, h, cols, rows int) *scene.Scene {
 	return c.Scene()
 }
 
+func ManySegments(w, h, spikes int) *scene.Scene {
+	c := render.NewCanvas()
+	c.FillColor(path.Rect(geom.RectXYWH(0, 0, float64(w), float64(h))), paint.FromRGBA8(20, 22, 28, 255))
+	cx, cy := float64(w)/2, float64(h)/2
+	outer := math.Min(float64(w), float64(h)) * 0.48
+	inner := outer * 0.55
+	var p path.Path
+	n := spikes * 2
+	for i := 0; i < n; i++ {
+		ang := 2 * math.Pi * float64(i) / float64(n)
+		rad := outer
+		if i%2 == 1 {
+			rad = inner
+		}
+		pt := geom.Pt(cx+rad*math.Cos(ang), cy+rad*math.Sin(ang))
+		if i == 0 {
+			p.MoveTo(pt)
+		} else {
+			p.LineTo(pt)
+		}
+	}
+	p.Close()
+	c.FillColor(p, paint.FromRGBA8(220, 120, 60, 255))
+	return c.Scene()
+}
+
 func appendPath(dst *path.Path, src path.Path) {
 	it := src.Iter()
 	for {

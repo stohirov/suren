@@ -71,6 +71,11 @@ func TestParityGradient(t *testing.T) {
 	parity(t, cpu.Render(sample.GradientScene(), sample.W, sample.H), sample.GradientScene())
 }
 
+func TestParityManySegments(t *testing.T) {
+	const w, h = 400, 300
+	parity(t, cpu.Render(sample.ManySegments(w, h, 300), w, h), sample.ManySegments(w, h, 300))
+}
+
 func TestResizeParity(t *testing.T) {
 	const w0, h0 = 96, 96
 	const w1, h1 = 200, 140
