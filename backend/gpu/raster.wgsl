@@ -8,8 +8,10 @@ struct Node {
   clx0: f32, cly0: f32, clx1: f32, cly1: f32,
   bbx0: f32, bby0: f32, bbx1: f32, bby1: f32,
   m0: f32, m1: f32, m2: f32, m3: f32, m4: f32, m5: f32,
-  pad0: f32, pad1: f32,
+  clipStart: u32, clipCount: u32,
 };
+
+struct ClipRec { segStart: u32, segCount: u32, rule: u32, pad: u32 };
 
 struct Dims { w: u32, h: u32, nx: u32, ny: u32 };
 
@@ -26,6 +28,7 @@ const TILE: i32 = 16;
 @group(0) @binding(6) var<storage, read> stops: array<Stop>;
 @group(0) @binding(7) var<storage, read> tileSegOff: array<u32>;
 @group(0) @binding(8) var<storage, read> tileSegIdx: array<u32>;
+@group(0) @binding(9) var<storage, read> clips: array<ClipRec>;
 
 fn interpStops(start: u32, count: u32, t: f32) -> vec4<f32> {
   if (count == 0u) { return vec4<f32>(0.0); }
@@ -233,6 +236,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   var cov: array<f32, 16>;
   var ar: array<f32, 16>;
+  var ccov: array<f32, 16>;
+  var car: array<f32, 16>;
+  var clipf: array<f32, 16>;
 
   for (var k = start; k < end; k = k + 1u) {
     let nd = nodes[tileNodes[k]];
@@ -250,6 +256,24 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       routeSeg(segs[tileSegIdx[j]], y, X0, W, &cov, &ar, &backdrop);
     }
 
+    for (var i = 0; i < TILE; i = i + 1) { clipf[i] = 1.0; }
+    let cl0 = nd.clipStart;
+    let cl1 = nd.clipStart + nd.clipCount;
+    for (var ci = cl0; ci < cl1; ci = ci + 1u) {
+      let cl = clips[ci];
+      for (var i = 0; i < TILE; i = i + 1) { ccov[i] = 0.0; car[i] = 0.0; }
+      var cbd = 0.0;
+      let cs1 = cl.segStart + cl.segCount;
+      for (var si = cl.segStart; si < cs1; si = si + 1u) {
+        routeSeg(segs[si], y, X0, W, &ccov, &car, &cbd);
+      }
+      var cacc = cbd;
+      for (var lx = 0; lx < spanW; lx = lx + 1) {
+        cacc = cacc + ccov[lx];
+        clipf[lx] = clipf[lx] * coverage(cacc - car[lx] * 0.5, cl.rule);
+      }
+    }
+
     let clx0 = max(0, i32(floor(nd.clx0)));
     let clx1 = min(W, i32(ceil(nd.clx1)));
     var acc = backdrop;
@@ -257,7 +281,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       acc = acc + cov[lx];
       let gx = X0 + lx;
       if (gx < clx0 || gx >= clx1) { continue; }
-      let alpha = coverage(acc - ar[lx] * 0.5, nd.rule);
+      let alpha = coverage(acc - ar[lx] * 0.5, nd.rule) * clipf[lx];
       if (alpha > 0.0) {
         var src = vec4<f32>(nd.cr, nd.cg, nd.cb, nd.ca);
         if (nd.kind != 0u) {

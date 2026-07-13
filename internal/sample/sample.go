@@ -113,6 +113,22 @@ func ManySegments(w, h, spikes int) *scene.Scene {
 	return c.Scene()
 }
 
+func ClipPathScene(nested bool) *scene.Scene {
+	c := render.NewCanvas()
+	c.FillColor(path.Rect(geom.RectXYWH(0, 0, W, H)), paint.FromRGBA8(28, 30, 38, 255))
+	c.Save()
+	c.ClipPath(path.Circle(geom.Pt(W*0.42, H*0.5), H*0.42), paint.NonZero)
+	if nested {
+		c.ClipPath(path.Circle(geom.Pt(W*0.6, H*0.5), H*0.42), paint.NonZero)
+	}
+	c.FillColor(path.Rect(geom.RectXYWH(0, 0, W, H)), paint.FromRGBA8(230, 120, 60, 255))
+	c.Fill(path.Circle(geom.Pt(W*0.5, H*0.5), H*0.62), paint.Solid{Color: paint.RGBA(0.2, 0.72, 0.9, 0.8)}, paint.NonZero)
+	c.StrokeColor(path.Rect(geom.RectXYWH(W*0.2, H*0.2, W*0.55, H*0.55)), paint.FromRGBA8(255, 240, 180, 255), paint.Stroke{Width: 10})
+	c.Restore()
+	c.FillColor(path.Circle(geom.Pt(W*0.85, H*0.2), 12), paint.RGB(1, 1, 1))
+	return c.Scene()
+}
+
 func BlendScene(op paint.BlendMode) *scene.Scene {
 	s := &scene.Scene{}
 	solid := func(p path.Path, c paint.Color, blend paint.BlendMode) {

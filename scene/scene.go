@@ -14,6 +14,12 @@ type Node struct {
 	FillRule  paint.FillRule
 	Stroke    *paint.Stroke
 	Clip      *geom.Rect
+	Clips     []ClipPath
+}
+
+type ClipPath struct {
+	Path path.Path
+	Rule paint.FillRule
 }
 
 func (n Node) Filled() bool { return n.Stroke == nil }

@@ -12,8 +12,11 @@ import (
 )
 
 type Renderer struct {
-	Img *image.RGBA
-	ras *raster.Rasterizer
+	Img     *image.RGBA
+	ras     *raster.Rasterizer
+	clipRas *raster.Rasterizer
+	mask    []float64
+	tmp     []float64
 }
 
 func (r *Renderer) Render(s *scene.Scene) error {
@@ -46,9 +49,47 @@ func (r *Renderer) Render(s *scene.Scene) error {
 		if c, ok := clipRect(n.Clip); ok {
 			clip = c
 		}
-		r.ras.FillPaint(r.Img, geo, n.Transform, sh, rule, clip, raster.BlendMode(n.Op))
+		mask := r.clipMask(n.Clips, b)
+		r.ras.FillPaint(r.Img, geo, n.Transform, sh, rule, clip, raster.BlendMode(n.Op), mask)
 	}
 	return nil
+}
+
+func (r *Renderer) clipMask(clips []scene.ClipPath, b image.Rectangle) []float64 {
+	if len(clips) == 0 {
+		return nil
+	}
+	w, h := b.Dx(), b.Dy()
+	n := w * h
+	if cap(r.mask) < n {
+		r.mask = make([]float64, n)
+		r.tmp = make([]float64, n)
+	}
+	r.mask = r.mask[:n]
+	r.tmp = r.tmp[:n]
+	for i := range r.mask {
+		r.mask[i] = 1
+	}
+	if r.clipRas == nil {
+		r.clipRas = raster.NewRasterizer(w, h)
+	} else {
+		r.clipRas.Resize(w, h)
+	}
+	shift := geom.Translate(float64(-b.Min.X), float64(-b.Min.Y))
+	for _, cl := range clips {
+		for i := range r.tmp {
+			r.tmp[i] = 0
+		}
+		r.clipRas.Reset()
+		r.clipRas.FillPath(cl.Path, path.DefaultTolerance, shift)
+		r.clipRas.Sweep(fillRule(cl.Rule), func(x, y int, a float64) {
+			r.tmp[y*w+x] = a
+		})
+		for i := range r.mask {
+			r.mask[i] *= r.tmp[i]
+		}
+	}
+	return r.mask
 }
 
 func strokeOutline(n scene.Node) path.Path {

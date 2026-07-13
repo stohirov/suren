@@ -101,6 +101,17 @@ func TestParityBlendModes(t *testing.T) {
 	}
 }
 
+func TestParityClipPath(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		nested bool
+	}{{"single", false}, {"nested", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			parity(t, cpu.Render(sample.ClipPathScene(tc.nested), sample.W, sample.H), sample.ClipPathScene(tc.nested))
+		})
+	}
+}
+
 func TestParityManySegments(t *testing.T) {
 	const w, h = 400, 300
 	parity(t, cpu.Render(sample.ManySegments(w, h, 300), w, h), sample.ManySegments(w, h, 300))

@@ -12,9 +12,10 @@ type Renderer interface {
 }
 
 type state struct {
-	ctm   geom.Matrix
-	clip  *geom.Rect
-	blend paint.BlendMode
+	ctm       geom.Matrix
+	clip      *geom.Rect
+	clipPaths []scene.ClipPath
+	blend     paint.BlendMode
 }
 
 type Canvas struct {
@@ -54,6 +55,19 @@ func (c *Canvas) ClipRect(r geom.Rect) {
 	c.st.clip = &d
 }
 
+func (c *Canvas) ClipPath(p path.Path, rule paint.FillRule) {
+	dp := p.Transform(c.st.ctm)
+	d := dp.Bounds()
+	if c.st.clip != nil {
+		d = d.Intersect(*c.st.clip)
+	}
+	c.st.clip = &d
+	next := make([]scene.ClipPath, len(c.st.clipPaths)+1)
+	copy(next, c.st.clipPaths)
+	next[len(c.st.clipPaths)] = scene.ClipPath{Path: dp, Rule: rule}
+	c.st.clipPaths = next
+}
+
 func deviceBBox(m geom.Matrix, r geom.Rect) geom.Rect {
 	corners := [4]geom.Point{
 		m.Apply(r.Min),
@@ -76,6 +90,7 @@ func (c *Canvas) Fill(p path.Path, pt paint.Paint, rule paint.FillRule) {
 		Op:        c.st.blend,
 		FillRule:  rule,
 		Clip:      c.st.clip,
+		Clips:     c.st.clipPaths,
 	})
 }
 
@@ -92,6 +107,7 @@ func (c *Canvas) Stroke(p path.Path, pt paint.Paint, s paint.Stroke) {
 		Op:        c.st.blend,
 		Stroke:    &sc,
 		Clip:      c.st.clip,
+		Clips:     c.st.clipPaths,
 	})
 }
 

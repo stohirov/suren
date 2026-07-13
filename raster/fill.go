@@ -144,7 +144,7 @@ func softLight(cb, cs float64) float64 {
 	return cb + (2*cs-1)*(d-cb)
 }
 
-func (r *Rasterizer) FillPaint(dst *image.RGBA, p path.Path, m geom.Matrix, sh Shader, rule FillRule, clip image.Rectangle, mode BlendMode) {
+func (r *Rasterizer) FillPaint(dst *image.RGBA, p path.Path, m geom.Matrix, sh Shader, rule FillRule, clip image.Rectangle, mode BlendMode, mask []float64) {
 	if r.w == 0 || r.h == 0 {
 		return
 	}
@@ -183,6 +183,9 @@ func (r *Rasterizer) FillPaint(dst *image.RGBA, p path.Path, m geom.Matrix, sh S
 				} else {
 					alpha = 0
 				}
+			}
+			if mask != nil {
+				alpha *= mask[row+x]
 			}
 			if alpha > 0 {
 				blend(dst, b.Min.X+x, b.Min.Y+y, sh, alpha, mode)

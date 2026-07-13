@@ -27,7 +27,7 @@ func benchDispatch(b *testing.B, s *scene.Scene) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if err := r.ras.run(r.dev, r.target, r.segBuf, r.nodeBuf, r.tileOff, r.tileNode, r.stopBuf, r.tileSegOf, r.tileSegIx, r.nx, r.ny); err != nil {
+		if err := r.ras.run(r.dev, r.target, r.segBuf, r.nodeBuf, r.tileOff, r.tileNode, r.stopBuf, r.tileSegOf, r.tileSegIx, r.clipsBuf, r.nx, r.ny); err != nil {
 			b.Fatal(err)
 		}
 		r.Sync()

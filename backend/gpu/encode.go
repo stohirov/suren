@@ -42,7 +42,15 @@ type Node struct {
 	Clip      [4]float32
 	BBox      [4]float32
 	Minv      [6]float32
-	Pad       [2]float32
+	ClipStart uint32
+	ClipCount uint32
+}
+
+type ClipRec struct {
+	SegStart uint32
+	SegCount uint32
+	Rule     uint32
+	Pad      uint32
 }
 
 const tileSize = 16
@@ -58,6 +66,7 @@ type Encoded struct {
 	TileNodes     []uint32
 	TileSegOff    []uint32
 	TileSegIdx    []uint32
+	Clips         []ClipRec
 	Fingerprint   uint64
 
 	flatScratch []geom.Point
@@ -78,6 +87,7 @@ func EncodeInto(e *Encoded, s *scene.Scene, w, h int) {
 	e.Segments = e.Segments[:0]
 	e.Nodes = e.Nodes[:0]
 	e.Stops = e.Stops[:0]
+	e.Clips = e.Clips[:0]
 	for _, n := range s.Nodes {
 		kind, ok := paintKind(n.Paint)
 		if !ok {
@@ -107,6 +117,7 @@ func EncodeInto(e *Encoded, s *scene.Scene, w, h int) {
 		}
 		e.fillPaint(&nd, kind, n)
 		setClip(&nd, n.Clip, w, h)
+		e.appendClips(&nd, n.Clips)
 		e.Nodes = append(e.Nodes, nd)
 	}
 	e.NTilesX = (w + tileSize - 1) / tileSize
@@ -280,6 +291,23 @@ func (e *Encoded) fillPaint(nd *Node, kind PaintKind, n scene.Node) {
 		nd.StopCount = uint32(len(e.Stops)) - nd.StopStart
 		nd.Minv = invMatrix(n.Transform)
 	}
+}
+
+func (e *Encoded) appendClips(nd *Node, clips []scene.ClipPath) {
+	nd.ClipStart = uint32(len(e.Clips))
+	for _, cl := range clips {
+		start := uint32(len(e.Segments))
+		e.appendSegments(cl.Path, geom.Identity())
+		if uint32(len(e.Segments)) == start {
+			continue
+		}
+		rule := uint32(0)
+		if cl.Rule == paint.EvenOdd {
+			rule = 1
+		}
+		e.Clips = append(e.Clips, ClipRec{SegStart: start, SegCount: uint32(len(e.Segments)) - start, Rule: rule})
+	}
+	nd.ClipCount = uint32(len(e.Clips)) - nd.ClipStart
 }
 
 func paintKind(p paint.Paint) (PaintKind, bool) {
