@@ -65,36 +65,42 @@ func (r *Rasterizer) Line(p0, p1 geom.Point) {
 }
 
 func (r *Rasterizer) accumulate(yi int, xa, xb, dy float64) {
-	row := yi * r.w
-	deposit := func(col int, dseg, fxin, fxout float64) {
-		if col < 0 {
-			col, fxin, fxout = 0, 0, 0
-		} else if col >= r.w {
-			return
-		}
-		r.cover[row+col] += dseg
-		r.area[row+col] += dseg * (fxin + fxout)
-	}
-
 	x0, x1 := xa, xb
 	if x0 > x1 {
 		x0, x1 = x1, x0
 	}
+	if x0 >= float64(r.w) {
+		return
+	}
+	row := yi * r.w
+
 	if x1-x0 < 1e-12 {
 		col := int(math.Floor(x0))
 		fx := x0 - math.Floor(x0)
-		deposit(col, dy, fx, fx)
+		if col < 0 {
+			col, fx = 0, 0
+		}
+		r.cover[row+col] += dy
+		r.area[row+col] += dy * 2 * fx
 		return
 	}
+
 	inv := 1 / (x1 - x0)
-	for col := int(math.Floor(x0)); float64(col) < x1; col++ {
+
+	if x0 < 0 {
+		r.cover[row] += dy * (math.Min(x1, 0) - x0) * inv
+		x0 = 0
+	}
+
+	for col := int(math.Floor(x0)); float64(col) < x1 && col < r.w; col++ {
 		xl := math.Max(x0, float64(col))
 		xr := math.Min(x1, float64(col+1))
 		if xl >= xr {
 			continue
 		}
 		dseg := dy * (xr - xl) * inv
-		deposit(col, dseg, xl-float64(col), xr-float64(col))
+		r.cover[row+col] += dseg
+		r.area[row+col] += dseg * (xl - float64(col) + xr - float64(col))
 	}
 }
 
