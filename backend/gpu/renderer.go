@@ -75,35 +75,52 @@ func (r *Renderer) Sync() {
 }
 
 func (r *Renderer) upload(e *Encoded) error {
-	r.releaseBuffers()
 	r.nx, r.ny = e.NTilesX, e.NTilesY
-	var err error
-	if r.segBuf, err = r.storage(wgpu.ToBytes(e.Segments)); err != nil {
+	if err := r.storage(&r.segBuf, wgpu.ToBytes(e.Segments)); err != nil {
 		return err
 	}
-	if r.nodeBuf, err = r.storage(wgpu.ToBytes(e.Nodes)); err != nil {
+	if err := r.storage(&r.nodeBuf, wgpu.ToBytes(e.Nodes)); err != nil {
 		return err
 	}
-	if r.stopBuf, err = r.storage(wgpu.ToBytes(e.Stops)); err != nil {
+	if err := r.storage(&r.stopBuf, wgpu.ToBytes(e.Stops)); err != nil {
 		return err
 	}
-	if r.tileOff, err = r.storage(wgpu.ToBytes(e.TileOffsets)); err != nil {
+	if err := r.storage(&r.tileOff, wgpu.ToBytes(e.TileOffsets)); err != nil {
 		return err
 	}
-	if r.tileNode, err = r.storage(wgpu.ToBytes(e.TileNodes)); err != nil {
+	if err := r.storage(&r.tileNode, wgpu.ToBytes(e.TileNodes)); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (r *Renderer) storage(data []byte) (*wgpu.Buffer, error) {
-	if len(data) == 0 {
-		return r.dev.device.CreateBuffer(&wgpu.BufferDescriptor{Size: 32, Usage: wgpu.BufferUsageStorage})
+const minBufSize = 32
+
+func (r *Renderer) storage(buf **wgpu.Buffer, data []byte) error {
+	need := uint64(len(data))
+	if *buf == nil || (*buf).GetSize() < need {
+		if *buf != nil {
+			(*buf).Release()
+			*buf = nil
+		}
+		size := need + need/2
+		if size < minBufSize {
+			size = minBufSize
+		}
+		size = (size + 3) &^ 3
+		b, err := r.dev.device.CreateBuffer(&wgpu.BufferDescriptor{
+			Size:  size,
+			Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopySrc | wgpu.BufferUsageCopyDst,
+		})
+		if err != nil {
+			return err
+		}
+		*buf = b
 	}
-	return r.dev.device.CreateBufferInit(&wgpu.BufferInitDescriptor{
-		Contents: data,
-		Usage:    wgpu.BufferUsageStorage | wgpu.BufferUsageCopySrc,
-	})
+	if len(data) > 0 {
+		return r.dev.queue.WriteBuffer(*buf, 0, data)
+	}
+	return nil
 }
 
 func (r *Renderer) releaseBuffers() {
