@@ -16,12 +16,12 @@ type Renderer struct {
 	target *target
 	ras    *rasterizer
 
-	segBuf  *wgpu.Buffer
-	nodeBuf *wgpu.Buffer
-	stopBuf *wgpu.Buffer
-	binOff  *wgpu.Buffer
-	binNode *wgpu.Buffer
-	nNodes  int
+	segBuf   *wgpu.Buffer
+	nodeBuf  *wgpu.Buffer
+	stopBuf  *wgpu.Buffer
+	tileOff  *wgpu.Buffer
+	tileNode *wgpu.Buffer
+	nx, ny   int
 }
 
 func NewRenderer(w, h int) (*Renderer, error) {
@@ -50,7 +50,7 @@ func (r *Renderer) Render(s *scene.Scene) error {
 	if err := r.upload(e); err != nil {
 		return err
 	}
-	return r.ras.run(r.dev, r.target, r.segBuf, r.nodeBuf, r.binOff, r.binNode, r.nNodes)
+	return r.ras.run(r.dev, r.target, r.segBuf, r.nodeBuf, r.tileOff, r.tileNode, r.nx, r.ny)
 }
 
 func (r *Renderer) ReadRGBA() (*image.RGBA, error) { return r.target.readRGBA(r.dev) }
@@ -62,7 +62,7 @@ func (r *Renderer) Sync() {
 
 func (r *Renderer) upload(e *Encoded) error {
 	r.releaseBuffers()
-	r.nNodes = len(e.Nodes)
+	r.nx, r.ny = e.NTilesX, e.NTilesY
 	var err error
 	if r.segBuf, err = r.storage(wgpu.ToBytes(e.Segments)); err != nil {
 		return err
@@ -73,10 +73,10 @@ func (r *Renderer) upload(e *Encoded) error {
 	if r.stopBuf, err = r.storage(wgpu.ToBytes(e.Stops)); err != nil {
 		return err
 	}
-	if r.binOff, err = r.storage(wgpu.ToBytes(e.BinOffsets)); err != nil {
+	if r.tileOff, err = r.storage(wgpu.ToBytes(e.TileOffsets)); err != nil {
 		return err
 	}
-	if r.binNode, err = r.storage(wgpu.ToBytes(e.BinNodes)); err != nil {
+	if r.tileNode, err = r.storage(wgpu.ToBytes(e.TileNodes)); err != nil {
 		return err
 	}
 	return nil
@@ -93,7 +93,7 @@ func (r *Renderer) storage(data []byte) (*wgpu.Buffer, error) {
 }
 
 func (r *Renderer) releaseBuffers() {
-	for _, b := range []**wgpu.Buffer{&r.segBuf, &r.nodeBuf, &r.stopBuf, &r.binOff, &r.binNode} {
+	for _, b := range []**wgpu.Buffer{&r.segBuf, &r.nodeBuf, &r.stopBuf, &r.tileOff, &r.tileNode} {
 		if *b != nil {
 			(*b).Release()
 			*b = nil

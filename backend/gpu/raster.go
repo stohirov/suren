@@ -14,9 +14,6 @@ type rasterizer struct {
 	pipeline *wgpu.ComputePipeline
 	layout   *wgpu.BindGroupLayout
 	uniform  *wgpu.Buffer
-	fb       *wgpu.Buffer
-	cover    *wgpu.Buffer
-	area     *wgpu.Buffer
 	w, h     int
 }
 
@@ -36,19 +33,6 @@ func newRasterizer(d *Device, w, h int) (*rasterizer, error) {
 		return nil, err
 	}
 
-	n := uint64(w) * uint64(h)
-	fb, err := d.device.CreateBuffer(&wgpu.BufferDescriptor{Size: n * 16, Usage: wgpu.BufferUsageStorage})
-	if err != nil {
-		return nil, err
-	}
-	cover, err := d.device.CreateBuffer(&wgpu.BufferDescriptor{Size: n * 4, Usage: wgpu.BufferUsageStorage})
-	if err != nil {
-		return nil, err
-	}
-	area, err := d.device.CreateBuffer(&wgpu.BufferDescriptor{Size: n * 4, Usage: wgpu.BufferUsageStorage})
-	if err != nil {
-		return nil, err
-	}
 	uniform, err := d.device.CreateBuffer(&wgpu.BufferDescriptor{
 		Size:  16,
 		Usage: wgpu.BufferUsageUniform | wgpu.BufferUsageCopyDst,
@@ -61,16 +45,13 @@ func newRasterizer(d *Device, w, h int) (*rasterizer, error) {
 		pipeline: pipeline,
 		layout:   pipeline.GetBindGroupLayout(0),
 		uniform:  uniform,
-		fb:       fb,
-		cover:    cover,
-		area:     area,
 		w:        w,
 		h:        h,
 	}, nil
 }
 
-func (r *rasterizer) run(d *Device, t *target, segs, nodes, binOff, binNodes *wgpu.Buffer, nNodes int) error {
-	dims := [4]uint32{uint32(r.w), uint32(r.h), uint32(nNodes), 0}
+func (r *rasterizer) run(d *Device, t *target, segs, nodes, tileOff, tileNodes *wgpu.Buffer, nx, ny int) error {
+	dims := [4]uint32{uint32(r.w), uint32(r.h), uint32(nx), uint32(ny)}
 	if err := d.queue.WriteBuffer(r.uniform, 0, unsafe.Slice((*byte)(unsafe.Pointer(&dims[0])), 16)); err != nil {
 		return err
 	}
@@ -82,11 +63,8 @@ func (r *rasterizer) run(d *Device, t *target, segs, nodes, binOff, binNodes *wg
 			{Binding: 1, Buffer: segs, Size: segs.GetSize()},
 			{Binding: 2, Buffer: nodes, Size: nodes.GetSize()},
 			{Binding: 3, Buffer: r.uniform, Size: 16},
-			{Binding: 4, Buffer: r.fb, Size: r.fb.GetSize()},
-			{Binding: 5, Buffer: r.cover, Size: r.cover.GetSize()},
-			{Binding: 6, Buffer: r.area, Size: r.area.GetSize()},
-			{Binding: 7, Buffer: binOff, Size: binOff.GetSize()},
-			{Binding: 8, Buffer: binNodes, Size: binNodes.GetSize()},
+			{Binding: 4, Buffer: tileOff, Size: tileOff.GetSize()},
+			{Binding: 5, Buffer: tileNodes, Size: tileNodes.GetSize()},
 		},
 	})
 	if err != nil {
@@ -101,7 +79,7 @@ func (r *rasterizer) run(d *Device, t *target, segs, nodes, binOff, binNodes *wg
 	pass := enc.BeginComputePass(nil)
 	pass.SetPipeline(r.pipeline)
 	pass.SetBindGroup(0, group, nil)
-	pass.DispatchWorkgroups((uint32(r.h)+63)/64, 1, 1)
+	pass.DispatchWorkgroups(uint32(nx), (uint32(r.h)+63)/64, 1)
 	pass.End()
 	pass.Release()
 
@@ -117,10 +95,8 @@ func (r *rasterizer) run(d *Device, t *target, segs, nodes, binOff, binNodes *wg
 }
 
 func (r *rasterizer) release() {
-	for _, b := range []*wgpu.Buffer{r.uniform, r.fb, r.cover, r.area} {
-		if b != nil {
-			b.Release()
-		}
+	if r.uniform != nil {
+		r.uniform.Release()
 	}
 	if r.layout != nil {
 		r.layout.Release()

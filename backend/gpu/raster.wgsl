@@ -11,21 +11,16 @@ struct Node {
   pad0: f32, pad1: f32,
 };
 
-struct Dims { w: u32, h: u32, n: u32, pad: u32 };
+struct Dims { w: u32, h: u32, nx: u32, ny: u32 };
+
+const TILE: i32 = 16;
 
 @group(0) @binding(0) var out_tex: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(1) var<storage, read> segs: array<Seg>;
 @group(0) @binding(2) var<storage, read> nodes: array<Node>;
 @group(0) @binding(3) var<uniform> dims: Dims;
-@group(0) @binding(4) var<storage, read_write> fb: array<vec4<f32>>;
-@group(0) @binding(5) var<storage, read_write> cover: array<f32>;
-@group(0) @binding(6) var<storage, read_write> area: array<f32>;
-@group(0) @binding(7) var<storage, read> binOffsets: array<u32>;
-@group(0) @binding(8) var<storage, read> binNodes: array<u32>;
-
-fn clampi(v: i32, lo: i32, hi: i32) -> i32 {
-  return max(lo, min(v, hi));
-}
+@group(0) @binding(4) var<storage, read> tileOffsets: array<u32>;
+@group(0) @binding(5) var<storage, read> tileNodes: array<u32>;
 
 fn coverage(wv: f32, rule: u32) -> f32 {
   var a = abs(wv);
@@ -37,43 +32,25 @@ fn coverage(wv: f32, rule: u32) -> f32 {
   return min(a, 1.0);
 }
 
-fn accumulate(base: u32, W: i32, xa: f32, xb: f32, dyv: f32) {
-  var x0 = min(xa, xb);
-  let x1 = max(xa, xb);
-  if (x0 >= f32(W)) { return; }
-
-  if (x1 - x0 < 1e-12) {
-    var col = i32(floor(x0));
-    var fx = x0 - floor(x0);
-    if (col < 0) { col = 0; fx = 0.0; }
-    let idx = base + u32(col);
-    cover[idx] = cover[idx] + dyv;
-    area[idx] = area[idx] + dyv * 2.0 * fx;
+fn routeCol(col: i32, dcov: f32, dar: f32, X0: i32,
+            cov: ptr<function, array<f32, 16>>,
+            ar: ptr<function, array<f32, 16>>,
+            backdrop: ptr<function, f32>) {
+  if (col < X0) {
+    *backdrop = *backdrop + dcov;
     return;
   }
-
-  let inv = 1.0 / (x1 - x0);
-  if (x0 < 0.0) {
-    cover[base] = cover[base] + dyv * (min(x1, 0.0) - x0) * inv;
-    x0 = 0.0;
-  }
-
-  var col = i32(floor(x0));
-  loop {
-    if (f32(col) >= x1 || col >= W) { break; }
-    let xl = max(x0, f32(col));
-    let xr = min(x1, f32(col + 1));
-    if (xl < xr) {
-      let dseg = dyv * (xr - xl) * inv;
-      let idx = base + u32(col);
-      cover[idx] = cover[idx] + dseg;
-      area[idx] = area[idx] + dseg * ((xl - f32(col)) + (xr - f32(col)));
-    }
-    col = col + 1;
+  let lx = col - X0;
+  if (lx < TILE) {
+    (*cov)[lx] = (*cov)[lx] + dcov;
+    (*ar)[lx] = (*ar)[lx] + dar;
   }
 }
 
-fn addSeg(s: Seg, yi: i32, base: u32, W: i32) {
+fn routeSeg(s: Seg, yi: i32, X0: i32, W: i32,
+            cov: ptr<function, array<f32, 16>>,
+            ar: ptr<function, array<f32, 16>>,
+            backdrop: ptr<function, f32>) {
   var ax = s.x0; var ay = s.y0; var bx = s.x1; var by = s.y1;
   var dir = 1.0;
   if (ay > by) {
@@ -89,66 +66,98 @@ fn addSeg(s: Seg, yi: i32, base: u32, W: i32) {
   if (top >= bot) { return; }
   let xa = ax + (top - ay) * dxdy;
   let xb = ax + (bot - ay) * dxdy;
-  accumulate(base, W, xa, xb, (bot - top) * dir);
+  let dyv = (bot - top) * dir;
+
+  var x0 = min(xa, xb);
+  let x1 = max(xa, xb);
+  if (x0 >= f32(W)) { return; }
+  let xright = X0 + TILE;
+
+  if (x1 - x0 < 1e-12) {
+    var col = i32(floor(x0));
+    var fx = x0 - floor(x0);
+    if (col < 0) { col = 0; fx = 0.0; }
+    routeCol(col, dyv, dyv * 2.0 * fx, X0, cov, ar, backdrop);
+    return;
+  }
+
+  let inv = 1.0 / (x1 - x0);
+  if (x0 < 0.0) {
+    routeCol(0, dyv * (min(x1, 0.0) - x0) * inv, 0.0, X0, cov, ar, backdrop);
+    x0 = 0.0;
+  }
+
+  var col = i32(floor(x0));
+  loop {
+    if (f32(col) >= x1 || col >= W || col >= xright) { break; }
+    let xl = max(x0, f32(col));
+    let xr = min(x1, f32(col + 1));
+    if (xl < xr) {
+      let dseg = dyv * (xr - xl) * inv;
+      routeCol(col, dseg, dseg * ((xl - f32(col)) + (xr - f32(col))), X0, cov, ar, backdrop);
+    }
+    col = col + 1;
+  }
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(1, 64, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let W = i32(dims.w);
   let H = i32(dims.h);
-  let y = i32(gid.x);
-  if (y >= H) { return; }
-  let base = u32(y) * dims.w;
+  let nx = i32(dims.nx);
+  let tileX = i32(gid.x);
+  let y = i32(gid.y);
+  if (y >= H || tileX >= nx) { return; }
 
-  for (var x = 0; x < W; x = x + 1) {
-    fb[base + u32(x)] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-  }
+  let X0 = tileX * TILE;
+  let spanW = min(TILE, W - X0);
+  let tile = u32((y / TILE) * nx + tileX);
+  let start = tileOffsets[tile];
+  let end = tileOffsets[tile + 1u];
 
-  let start = binOffsets[u32(y)];
-  let end = binOffsets[u32(y) + 1u];
+  var fbl: array<vec4<f32>, 16>;
+  for (var i = 0; i < TILE; i = i + 1) { fbl[i] = vec4<f32>(0.0); }
+
+  var cov: array<f32, 16>;
+  var ar: array<f32, 16>;
+
   for (var k = start; k < end; k = k + 1u) {
-    let nd = nodes[binNodes[k]];
-
-    let bx0 = clampi(i32(floor(nd.bbx0)), 0, W);
-    let bx1 = clampi(i32(floor(nd.bbx1)) + 1, 0, W);
-    if (bx0 >= bx1) { continue; }
+    let nd = nodes[tileNodes[k]];
 
     let cly0 = i32(floor(nd.cly0));
     let cly1 = i32(ceil(nd.cly1));
     if (y < cly0 || y >= cly1) { continue; }
-    let clx0 = max(bx0, max(0, i32(floor(nd.clx0))));
-    let clx1 = min(bx1, min(W, i32(ceil(nd.clx1))));
 
-    for (var x = bx0; x < bx1; x = x + 1) {
-      cover[base + u32(x)] = 0.0;
-      area[base + u32(x)] = 0.0;
-    }
+    for (var i = 0; i < TILE; i = i + 1) { cov[i] = 0.0; ar[i] = 0.0; }
+    var backdrop = 0.0;
 
     let s1 = nd.segStart + nd.segCount;
     for (var si = nd.segStart; si < s1; si = si + 1u) {
-      addSeg(segs[si], y, base, W);
+      routeSeg(segs[si], y, X0, W, &cov, &ar, &backdrop);
     }
 
-    var acc = 0.0;
-    for (var x = bx0; x < bx1; x = x + 1) {
-      acc = acc + cover[base + u32(x)];
-      if (x < clx0 || x >= clx1) { continue; }
-      let alpha = coverage(acc - area[base + u32(x)] * 0.5, nd.rule);
+    let clx0 = max(0, i32(floor(nd.clx0)));
+    let clx1 = min(W, i32(ceil(nd.clx1)));
+    var acc = backdrop;
+    for (var lx = 0; lx < spanW; lx = lx + 1) {
+      acc = acc + cov[lx];
+      let gx = X0 + lx;
+      if (gx < clx0 || gx >= clx1) { continue; }
+      let alpha = coverage(acc - ar[lx] * 0.5, nd.rule);
       if (alpha > 0.0) {
-        let idx = base + u32(x);
-        let dst = fb[idx];
-        let inv = 1.0 - nd.ca * alpha;
-        fb[idx] = vec4<f32>(
-          nd.cr * alpha + dst.x * inv,
-          nd.cg * alpha + dst.y * inv,
-          nd.cb * alpha + dst.z * inv,
-          nd.ca * alpha + dst.w * inv,
+        let dst = fbl[lx];
+        let invc = 1.0 - nd.ca * alpha;
+        fbl[lx] = vec4<f32>(
+          nd.cr * alpha + dst.x * invc,
+          nd.cg * alpha + dst.y * invc,
+          nd.cb * alpha + dst.z * invc,
+          nd.ca * alpha + dst.w * invc,
         );
       }
     }
   }
 
-  for (var x = 0; x < W; x = x + 1) {
-    textureStore(out_tex, vec2<i32>(x, y), fb[base + u32(x)]);
+  for (var lx = 0; lx < spanW; lx = lx + 1) {
+    textureStore(out_tex, vec2<i32>(X0 + lx, y), fbl[lx]);
   }
 }

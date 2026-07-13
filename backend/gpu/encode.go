@@ -44,13 +44,17 @@ type Node struct {
 	Pad       [2]float32
 }
 
+const tileSize = 16
+
 type Encoded struct {
 	Width, Height int
+	NTilesX       int
+	NTilesY       int
 	Segments      []Segment
 	Nodes         []Node
 	Stops         []Stop
-	BinOffsets    []uint32
-	BinNodes      []uint32
+	TileOffsets   []uint32
+	TileNodes     []uint32
 }
 
 func Encode(s *scene.Scene, w, h int) *Encoded {
@@ -85,26 +89,33 @@ func Encode(s *scene.Scene, w, h int) *Encoded {
 		setClip(&nd, n.Clip, w, h)
 		e.Nodes = append(e.Nodes, nd)
 	}
-	e.BinOffsets, e.BinNodes = buildBins(e.Nodes, h)
+	e.NTilesX = (w + tileSize - 1) / tileSize
+	e.NTilesY = (h + tileSize - 1) / tileSize
+	e.TileOffsets, e.TileNodes = buildTileBins(e.Nodes, e.NTilesX, e.NTilesY)
 	return e
 }
 
-func buildBins(nodes []Node, h int) ([]uint32, []uint32) {
-	rows := make([][]uint32, h)
+func buildTileBins(nodes []Node, nx, ny int) ([]uint32, []uint32) {
+	tiles := make([][]uint32, nx*ny)
 	for ni := range nodes {
-		y0 := clampInt(int(math.Floor(float64(nodes[ni].BBox[1]))), 0, h)
-		y1 := clampInt(int(math.Ceil(float64(nodes[ni].BBox[3]))), 0, h)
-		for y := y0; y < y1; y++ {
-			rows[y] = append(rows[y], uint32(ni))
+		bb := nodes[ni].BBox
+		tx0 := clampInt(int(math.Floor(float64(bb[0])))/tileSize, 0, nx)
+		tx1 := clampInt(int(math.Floor(float64(bb[2])))/tileSize+1, 0, nx)
+		ty0 := clampInt(int(math.Floor(float64(bb[1])))/tileSize, 0, ny)
+		ty1 := clampInt(int(math.Floor(float64(bb[3])))/tileSize+1, 0, ny)
+		for ty := ty0; ty < ty1; ty++ {
+			for tx := tx0; tx < tx1; tx++ {
+				tiles[ty*nx+tx] = append(tiles[ty*nx+tx], uint32(ni))
+			}
 		}
 	}
-	offsets := make([]uint32, h+1)
+	offsets := make([]uint32, nx*ny+1)
 	var flat []uint32
-	for y := 0; y < h; y++ {
-		offsets[y] = uint32(len(flat))
-		flat = append(flat, rows[y]...)
+	for i, t := range tiles {
+		offsets[i] = uint32(len(flat))
+		flat = append(flat, t...)
 	}
-	offsets[h] = uint32(len(flat))
+	offsets[nx*ny] = uint32(len(flat))
 	return offsets, flat
 }
 

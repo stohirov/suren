@@ -5,7 +5,11 @@ import (
 	"testing"
 
 	"github.com/stohirov/sukho/backend/cpu"
+	"github.com/stohirov/sukho/geom"
 	"github.com/stohirov/sukho/internal/sample"
+	"github.com/stohirov/sukho/paint"
+	"github.com/stohirov/sukho/path"
+	"github.com/stohirov/sukho/render"
 	"github.com/stohirov/sukho/scene"
 )
 
@@ -61,4 +65,16 @@ func TestParitySolid(t *testing.T) {
 func TestParityManyNodes(t *testing.T) {
 	const w, h = 640, 360
 	parity(t, cpu.Render(sample.ManyNodes(w, h, 40, 24), w, h), sample.ManyNodes(w, h, 40, 24))
+}
+
+func clipScene() *scene.Scene {
+	c := render.NewCanvas()
+	c.FillColor(path.Rect(geom.RectXYWH(0, 0, 96, 96)), paint.FromRGBA8(30, 30, 40, 255))
+	c.ClipRect(geom.RectXYWH(13, 13, 61, 47))
+	c.FillColor(path.Circle(geom.Pt(48, 48), 40), paint.FromRGBA8(220, 80, 60, 255))
+	return c.Scene()
+}
+
+func TestParityClip(t *testing.T) {
+	parity(t, cpu.Render(clipScene(), 96, 96), clipScene())
 }
