@@ -323,15 +323,32 @@ These are engine features the CPU side also lacks or only partially has; each mu
       empty backdrop regions so αb spans its range). 10/12 modes **Δ≤1**; the two division-based
       modes (ColorDodge/ColorBurn) **Δ≤3** — f32-vs-f64 divergence at the `min(1,·)` clamp on
       4/172800 channels, a precision artifact absorbed by tolerance, not a logic error.
-- [ ] **Arbitrary-path clips.** Clips are rectangles today (`geom.Rect`, matched on both
-      sides). True path clips need a coverage/mask approach (clip as a coverage buffer the
-      fine shader multiplies in), with nesting. This is a renderer feature, sequenced after
-      Phase 8's coarse infrastructure which the mask can reuse.
+### Arbitrary-path clips  ✅ `17f58a6`
+
+- [x] `scene.Node.Clips []ClipPath` holds **device-space** clip paths (+ fill rule); the
+      rect `Clip` stays as a cheap bbox pre-filter (intersection of all clip bboxes). `Canvas.ClipPath`
+      transforms by the CTM and force-copies onto the immutable clip stack so Save/Restore and
+      nesting compose correctly. Rect clips still nest via bbox intersection.
+- [x] **GPU:** encoder appends each clip path's segments to the `segs` buffer (not tile-binned —
+      accessed directly), emits per-clip `ClipRec{segStart,segCount,rule}` into a new `clips`
+      storage buffer (9th binding, 8 storage buffers total — at the default limit), and stores
+      `clipStart/clipCount` on the node (reused the old `Pad`). The fine shader, per node-entry,
+      runs a second signed-area sweep over each clip's segments → per-column coverage, multiplies
+      them into a `clipf[16]` factor, and multiplies that into the fill alpha before compositing.
+      Simple clips iterate all their segments per tile (no per-tile clip lists) — fine since clips
+      are small; a per-tile clip list is the optimization if a huge clip path shows up.
+- [x] **CPU:** `Renderer.clipMask` rasterizes each clip path with the same `Rasterizer` and
+      multiplies their coverages into one mask (product = intersection); `FillPaint` multiplies
+      `alpha` by the mask. Same coverage algorithm as the shader → parity.
+- [x] `TestParityClipPath` (single + nested) plus a clipped stroke: **Δ=1**; existing rect-clip
+      parity unchanged (Δ=0). Nesting verified as `fill ∩ A ∩ B`.
+- [ ] *Deferred:* per-tile clip segment lists (only if a complex clip path is slow); CPU mask
+      caching across nodes that share a clip stack; SVG backend still ignores path clips.
 - [ ] **Colorspace / sRGB correctness** once 6b introduces an sRGB surface: confirm the
       linear-premultiplied compositing still matches the CPU `image.RGBA` path end to end.
 
 **Done when:** each feature renders identically (within tolerance) on CPU and GPU via a
-dedicated parity scene. (Blend modes ✅; path clips and sRGB remain.)
+dedicated parity scene. (Blend modes ✅; path clips ✅; sRGB remains, gated on 6b.)
 
 ## Cross-cutting (fold into the phases above, not standalone work)
 
