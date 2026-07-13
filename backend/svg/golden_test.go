@@ -15,3 +15,11 @@ func TestGoldenSample(t *testing.T) {
 	}
 	goldentest.AssertText(t, "sample.svg", b.String())
 }
+
+func TestGoldenGradient(t *testing.T) {
+	var b strings.Builder
+	if err := Encode(&b, sample.GradientScene(), sample.W, sample.H); err != nil {
+		t.Fatal(err)
+	}
+	goldentest.AssertText(t, "gradient.svg", b.String())
+}

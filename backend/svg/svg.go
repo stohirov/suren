@@ -13,21 +13,71 @@ import (
 )
 
 func Encode(w io.Writer, s *scene.Scene, pxW, pxH int) error {
-	var b strings.Builder
-	fmt.Fprintf(&b, `<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d">`+"\n", pxW, pxH, pxW, pxH)
+	var body, defs strings.Builder
+	id := 0
 	for _, n := range s.Nodes {
-		col, ok := solidColor(n.Paint)
+		ref, ok := paintRef(n.Paint, &defs, &id)
 		if !ok {
 			continue
 		}
-		writeNode(&b, n, col)
+		writeNode(&body, n, ref)
 	}
-	b.WriteString("</svg>\n")
-	_, err := io.WriteString(w, b.String())
+
+	var out strings.Builder
+	fmt.Fprintf(&out, `<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d">`+"\n", pxW, pxH, pxW, pxH)
+	if defs.Len() > 0 {
+		out.WriteString("<defs>\n")
+		out.WriteString(defs.String())
+		out.WriteString("</defs>\n")
+	}
+	out.WriteString(body.String())
+	out.WriteString("</svg>\n")
+	_, err := io.WriteString(w, out.String())
 	return err
 }
 
-func writeNode(b *strings.Builder, n scene.Node, col paint.Color) {
+type fillRef struct {
+	solid bool
+	color paint.Color
+	url   string
+}
+
+func paintRef(p paint.Paint, defs *strings.Builder, id *int) (fillRef, bool) {
+	switch g := p.(type) {
+	case paint.Solid:
+		return fillRef{solid: true, color: g.Color}, true
+	case paint.LinearGradient:
+		name := fmt.Sprintf("g%d", *id)
+		*id++
+		fmt.Fprintf(defs, `<linearGradient id="%s" gradientUnits="userSpaceOnUse" x1="%s" y1="%s" x2="%s" y2="%s">`+"\n",
+			name, f(g.P0.X), f(g.P0.Y), f(g.P1.X), f(g.P1.Y))
+		writeStops(defs, g.Stops)
+		defs.WriteString("</linearGradient>\n")
+		return fillRef{url: "url(#" + name + ")"}, true
+	case paint.RadialGradient:
+		name := fmt.Sprintf("g%d", *id)
+		*id++
+		fmt.Fprintf(defs, `<radialGradient id="%s" gradientUnits="userSpaceOnUse" cx="%s" cy="%s" r="%s">`+"\n",
+			name, f(g.Center.X), f(g.Center.Y), f(g.Radius))
+		writeStops(defs, g.Stops)
+		defs.WriteString("</radialGradient>\n")
+		return fillRef{url: "url(#" + name + ")"}, true
+	default:
+		return fillRef{}, false
+	}
+}
+
+func writeStops(b *strings.Builder, stops []paint.Stop) {
+	for _, s := range stops {
+		fmt.Fprintf(b, `<stop offset="%s" stop-color="%s"`, f(s.Offset), hex(s.Color))
+		if s.Color.A < 1 {
+			fmt.Fprintf(b, ` stop-opacity="%s"`, f(clamp01(s.Color.A)))
+		}
+		b.WriteString("/>\n")
+	}
+}
+
+func writeNode(b *strings.Builder, n scene.Node, ref fillRef) {
 	b.WriteString(`<path d="`)
 	writeData(b, n.Path)
 	b.WriteString(`"`)
@@ -36,28 +86,23 @@ func writeNode(b *strings.Builder, n scene.Node, col paint.Color) {
 			f(m.A), f(m.B), f(m.C), f(m.D), f(m.E), f(m.F))
 	}
 	if n.Stroke != nil {
-		writeStroke(b, *n.Stroke, col)
+		writeStroke(b, *n.Stroke, ref)
 	} else {
-		writeFill(b, n.FillRule, col)
+		writeFill(b, n.FillRule, ref)
 	}
 	b.WriteString("/>\n")
 }
 
-func writeFill(b *strings.Builder, rule paint.FillRule, col paint.Color) {
-	fmt.Fprintf(b, ` fill="%s"`, hex(col))
-	if col.A < 1 {
-		fmt.Fprintf(b, ` fill-opacity="%s"`, f(clamp01(col.A)))
-	}
+func writeFill(b *strings.Builder, rule paint.FillRule, ref fillRef) {
+	writePaint(b, "fill", ref)
 	if rule == paint.EvenOdd {
 		b.WriteString(` fill-rule="evenodd"`)
 	}
 }
 
-func writeStroke(b *strings.Builder, s paint.Stroke, col paint.Color) {
-	fmt.Fprintf(b, ` fill="none" stroke="%s"`, hex(col))
-	if col.A < 1 {
-		fmt.Fprintf(b, ` stroke-opacity="%s"`, f(clamp01(col.A)))
-	}
+func writeStroke(b *strings.Builder, s paint.Stroke, ref fillRef) {
+	b.WriteString(` fill="none"`)
+	writePaint(b, "stroke", ref)
 	fmt.Fprintf(b, ` stroke-width="%s"`, f(s.Width))
 	if cap := capName(s.Cap); cap != "butt" {
 		fmt.Fprintf(b, ` stroke-linecap="%s"`, cap)
@@ -77,6 +122,17 @@ func writeStroke(b *strings.Builder, s paint.Stroke, col paint.Color) {
 		if s.DashOffset != 0 {
 			fmt.Fprintf(b, ` stroke-dashoffset="%s"`, f(s.DashOffset))
 		}
+	}
+}
+
+func writePaint(b *strings.Builder, attr string, ref fillRef) {
+	if !ref.solid {
+		fmt.Fprintf(b, ` %s="%s"`, attr, ref.url)
+		return
+	}
+	fmt.Fprintf(b, ` %s="%s"`, attr, hex(ref.color))
+	if ref.color.A < 1 {
+		fmt.Fprintf(b, ` %s-opacity="%s"`, attr, f(clamp01(ref.color.A)))
 	}
 }
 
@@ -106,13 +162,6 @@ func writeData(b *strings.Builder, p path.Path) {
 			b.WriteByte('Z')
 		}
 	}
-}
-
-func solidColor(p paint.Paint) (paint.Color, bool) {
-	if s, ok := p.(paint.Solid); ok {
-		return s.Color, true
-	}
-	return paint.Color{}, false
 }
 
 func capName(c path.Cap) string {

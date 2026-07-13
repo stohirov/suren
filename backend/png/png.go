@@ -7,6 +7,7 @@ import (
 
 	"github.com/stohirov/sukho/geom"
 	"github.com/stohirov/sukho/paint"
+	"github.com/stohirov/sukho/path"
 	"github.com/stohirov/sukho/raster"
 	"github.com/stohirov/sukho/scene"
 )
@@ -18,24 +19,36 @@ type Renderer struct {
 func (r *Renderer) Render(s *scene.Scene) error {
 	view := viewRect(r.Img.Bounds())
 	for _, n := range s.Nodes {
-		col, ok := solidColor(n.Paint)
-		if !ok {
-			continue
-		}
 		if culled(n, view) {
 			continue
 		}
+		geo := n.Path
+		rule := fillRule(n.FillRule)
 		if n.Stroke != nil {
-			if d, dashed := n.Stroke.Dash(); dashed {
-				raster.StrokeDashed(r.Img, n.Path, n.Transform, n.Stroke.Stroker(), d, col)
-			} else {
-				raster.Stroke(r.Img, n.Path, n.Transform, n.Stroke.Stroker(), col)
-			}
+			geo = strokeOutline(n)
+			rule = raster.NonZero
+		}
+		if col, ok := solidColor(n.Paint); ok {
+			raster.Fill(r.Img, geo, n.Transform, col, rule)
 			continue
 		}
-		raster.Fill(r.Img, n.Path, n.Transform, col, fillRule(n.FillRule))
+		if sh, ok := shader(n.Paint, n.Transform); ok {
+			raster.FillShader(r.Img, geo, n.Transform, sh, rule)
+		}
 	}
 	return nil
+}
+
+func strokeOutline(n scene.Node) path.Path {
+	tol := path.DefaultTolerance
+	if k := n.Transform.MaxScale(); k > 0 {
+		tol /= k
+	}
+	src := n.Path
+	if d, ok := n.Stroke.Dash(); ok {
+		src = d.Apply(src, tol)
+	}
+	return n.Stroke.Stroker().Stroke(src, tol)
 }
 
 func Render(s *scene.Scene, pxW, pxH int) *image.RGBA {

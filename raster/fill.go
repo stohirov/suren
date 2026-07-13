@@ -17,10 +17,24 @@ func (r *Rasterizer) FillPath(p path.Path, tol float64, m geom.Matrix) {
 	})
 }
 
-func (r *Rasterizer) Paint(dst *image.RGBA, c color.Color, rule FillRule) {
-	cr, cg, cb, ca := c.RGBA()
+type Shader interface {
+	RGBA(px, py int) (r, g, b, a float64)
+}
 
-	sr, sg, sb, sa := float64(cr)/257, float64(cg)/257, float64(cb)/257, float64(ca)/257
+type solidShader struct{ r, g, b, a float64 }
+
+func NewSolidShader(c color.Color) Shader {
+	cr, cg, cb, ca := c.RGBA()
+	return solidShader{float64(cr) / 257, float64(cg) / 257, float64(cb) / 257, float64(ca) / 257}
+}
+
+func (s solidShader) RGBA(int, int) (r, g, b, a float64) { return s.r, s.g, s.b, s.a }
+
+func (r *Rasterizer) Paint(dst *image.RGBA, c color.Color, rule FillRule) {
+	r.PaintShader(dst, NewSolidShader(c), rule)
+}
+
+func (r *Rasterizer) PaintShader(dst *image.RGBA, sh Shader, rule FillRule) {
 	b := dst.Bounds()
 	r.Sweep(rule, func(x, y int, cov float64) {
 		px, py := b.Min.X+x, b.Min.Y+y
@@ -28,6 +42,7 @@ func (r *Rasterizer) Paint(dst *image.RGBA, c color.Color, rule FillRule) {
 			return
 		}
 
+		sr, sg, sb, sa := sh.RGBA(px, py)
 		fa := sa * cov
 		inv := 1 - fa/255
 		i := dst.PixOffset(px, py)
@@ -50,10 +65,14 @@ func clamp8(v float64) uint8 {
 }
 
 func Fill(dst *image.RGBA, p path.Path, m geom.Matrix, c color.Color, rule FillRule) {
+	FillShader(dst, p, m, NewSolidShader(c), rule)
+}
+
+func FillShader(dst *image.RGBA, p path.Path, m geom.Matrix, sh Shader, rule FillRule) {
 	b := dst.Bounds()
 	r := NewRasterizer(b.Dx(), b.Dy())
 
 	shift := geom.Translate(float64(-b.Min.X), float64(-b.Min.Y)).Mul(m)
 	r.FillPath(p, path.DefaultTolerance, shift)
-	r.Paint(dst, c, rule)
+	r.PaintShader(dst, sh, rule)
 }

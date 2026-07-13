@@ -1,5 +1,6 @@
 package paint
 
+import "github.com/stohirov/sukho/geom"
 import "github.com/stohirov/sukho/path"
 
 type FillRule uint8
@@ -54,6 +55,60 @@ type Solid struct {
 }
 
 func (Solid) isPaint() {}
+
+type Stop struct {
+	Offset float64
+	Color  Color
+}
+
+type LinearGradient struct {
+	P0, P1 geom.Point
+	Stops  []Stop
+}
+
+func (LinearGradient) isPaint() {}
+
+type RadialGradient struct {
+	Center geom.Point
+	Radius float64
+	Stops  []Stop
+}
+
+func (RadialGradient) isPaint() {}
+
+func Interp(stops []Stop, t float64) Color {
+	if len(stops) == 0 {
+		return Color{}
+	}
+	if t <= stops[0].Offset {
+		return stops[0].Color
+	}
+	last := stops[len(stops)-1]
+	if t >= last.Offset {
+		return last.Color
+	}
+	for i := 1; i < len(stops); i++ {
+		hi := stops[i]
+		if t <= hi.Offset {
+			lo := stops[i-1]
+			span := hi.Offset - lo.Offset
+			if span <= 0 {
+				return hi.Color
+			}
+			return lerp(lo.Color, hi.Color, (t-lo.Offset)/span)
+		}
+	}
+	return last.Color
+}
+
+func lerp(a, b Color, t float64) Color {
+	return Color{
+		R: a.R + (b.R-a.R)*t,
+		G: a.G + (b.G-a.G)*t,
+		B: a.B + (b.B-a.B)*t,
+		A: a.A + (b.A-a.A)*t,
+	}
+}
 
 type Stroke struct {
 	Width      float64

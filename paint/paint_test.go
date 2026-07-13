@@ -38,6 +38,34 @@ func TestColorClamps(t *testing.T) {
 	}
 }
 
+func TestInterp(t *testing.T) {
+	stops := []Stop{
+		{Offset: 0, Color: RGB(0, 0, 0)},
+		{Offset: 0.5, Color: RGB(1, 0, 0)},
+		{Offset: 1, Color: RGB(1, 1, 1)},
+	}
+	eq := func(a, b float64) bool { d := a - b; return d < 1e-9 && d > -1e-9 }
+
+	if c := Interp(stops, 0.5); !eq(c.R, 1) || !eq(c.G, 0) || !eq(c.B, 0) {
+		t.Errorf("at stop 0.5 got %+v, want exact red", c)
+	}
+	if c := Interp(stops, 0.25); !eq(c.R, 0.5) || !eq(c.G, 0) {
+		t.Errorf("midpoint of first span got %+v, want R=0.5", c)
+	}
+	if c := Interp(stops, 0.75); !eq(c.G, 0.5) || !eq(c.B, 0.5) || !eq(c.R, 1) {
+		t.Errorf("midpoint of second span got %+v", c)
+	}
+	if c := Interp(stops, -1); !eq(c.R, 0) || !eq(c.B, 0) {
+		t.Errorf("below range should clamp to first stop, got %+v", c)
+	}
+	if c := Interp(stops, 2); !eq(c.R, 1) || !eq(c.G, 1) || !eq(c.B, 1) {
+		t.Errorf("above range should clamp to last stop, got %+v", c)
+	}
+	if c := Interp(nil, 0.5); c != (Color{}) {
+		t.Errorf("empty stops should give zero color, got %+v", c)
+	}
+}
+
 func TestStrokeDash(t *testing.T) {
 	s := Stroke{Width: 2, Dashes: []float64{4, 2}, DashOffset: 1}
 	d, ok := s.Dash()

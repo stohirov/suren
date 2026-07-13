@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="180" viewBox="0 0 240 180">
+<defs>
+<linearGradient id="g0" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="240" y2="180">
+<stop offset="0" stop-color="#282c34"/>
+<stop offset="1" stop-color="#2878dc"/>
+</linearGradient>
+<radialGradient id="g1" gradientUnits="userSpaceOnUse" cx="75" cy="75" r="70">
+<stop offset="0" stop-color="#ffffff"/>
+<stop offset="0.6" stop-color="#e6a028"/>
+<stop offset="1" stop-color="#e64541" stop-opacity="0"/>
+</radialGradient>
+<linearGradient id="g2" gradientUnits="userSpaceOnUse" x1="135" y1="120" x2="215" y2="120">
+<stop offset="0" stop-color="#ffffff"/>
+<stop offset="1" stop-color="#d64541"/>
+</linearGradient>
+</defs>
+<path d="M0 0 L240 0 L240 180 L0 180 Z" fill="url(#g0)"/>
+<path d="M150 90 C150 123.137085 123.137085 150 90 150 C56.862915 150 30 123.137085 30 90 C30 56.862915 56.862915 30 90 30 C123.137085 30 150 56.862915 150 90 Z" fill="url(#g1)"/>
+<path d="M215 120 C215 142.09139 197.09139 160 175 160 C152.90861 160 135 142.09139 135 120 C135 97.90861 152.90861 80 175 80 C197.09139 80 215 97.90861 215 120 Z" fill="none" stroke="url(#g2)" stroke-width="10" stroke-linejoin="round"/>
+</svg>

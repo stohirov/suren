@@ -39,6 +39,40 @@ func Scene() *scene.Scene {
 	return c.Scene()
 }
 
+func GradientScene() *scene.Scene {
+	c := render.NewCanvas()
+
+	c.Fill(path.Rect(geom.RectXYWH(0, 0, W, H)), paint.LinearGradient{
+		P0: geom.Pt(0, 0),
+		P1: geom.Pt(W, H),
+		Stops: []paint.Stop{
+			{Offset: 0, Color: paint.FromRGBA8(40, 44, 52, 255)},
+			{Offset: 1, Color: paint.FromRGBA8(40, 120, 220, 255)},
+		},
+	}, paint.NonZero)
+
+	c.Fill(path.Circle(geom.Pt(90, 90), 60), paint.RadialGradient{
+		Center: geom.Pt(75, 75),
+		Radius: 70,
+		Stops: []paint.Stop{
+			{Offset: 0, Color: paint.RGBA(1, 1, 1, 1)},
+			{Offset: 0.6, Color: paint.FromRGBA8(230, 160, 40, 255)},
+			{Offset: 1, Color: paint.RGBA(230/255.0, 69/255.0, 65/255.0, 0)},
+		},
+	}, paint.NonZero)
+
+	c.Stroke(path.Circle(geom.Pt(175, 120), 40), paint.LinearGradient{
+		P0: geom.Pt(135, 120),
+		P1: geom.Pt(215, 120),
+		Stops: []paint.Stop{
+			{Offset: 0, Color: paint.RGB(1, 1, 1)},
+			{Offset: 1, Color: paint.FromRGBA8(214, 69, 65, 255)},
+		},
+	}, paint.Stroke{Width: 10, Join: path.RoundJoin})
+
+	return c.Scene()
+}
+
 func appendPath(dst *path.Path, src path.Path) {
 	it := src.Iter()
 	for {
