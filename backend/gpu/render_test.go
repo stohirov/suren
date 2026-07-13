@@ -118,6 +118,62 @@ func TestResizeParity(t *testing.T) {
 	}
 }
 
+func TestUnchangedSceneSkips(t *testing.T) {
+	const w, h = 96, 96
+	r, err := NewRenderer(w, h)
+	if err != nil {
+		t.Skipf("no gpu device: %v", err)
+	}
+	defer r.Release()
+
+	read := func(sc *scene.Scene) *image.RGBA {
+		if err := r.Render(sc); err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		got, err := r.ReadRGBA()
+		if err != nil {
+			t.Fatalf("readback: %v", err)
+		}
+		return got
+	}
+	equal := func(a, b *image.RGBA) bool {
+		for i := range a.Pix {
+			if a.Pix[i] != b.Pix[i] {
+				return false
+			}
+		}
+		return true
+	}
+
+	a1 := read(clipScene())
+	if r.dispatches != 1 {
+		t.Fatalf("first render dispatches = %d, want 1", r.dispatches)
+	}
+	a2 := read(clipScene())
+	if r.dispatches != 1 {
+		t.Fatalf("unchanged re-render dispatched (%d), want skip", r.dispatches)
+	}
+	if !equal(a1, a2) {
+		t.Fatal("skipped frame did not re-present identical pixels")
+	}
+
+	b := read(sample.ManyNodes(w, h, 8, 6))
+	if r.dispatches != 2 {
+		t.Fatalf("changed scene skipped: dispatches = %d, want 2", r.dispatches)
+	}
+	if equal(a1, b) {
+		t.Fatal("different scenes produced identical pixels")
+	}
+
+	a3 := read(clipScene())
+	if r.dispatches != 3 {
+		t.Fatalf("returning to prior scene skipped: dispatches = %d, want 3", r.dispatches)
+	}
+	if !equal(a1, a3) {
+		t.Fatal("re-render of original scene diverged")
+	}
+}
+
 func clipScene() *scene.Scene {
 	c := render.NewCanvas()
 	c.FillColor(path.Rect(geom.RectXYWH(0, 0, 96, 96)), paint.FromRGBA8(30, 30, 40, 255))

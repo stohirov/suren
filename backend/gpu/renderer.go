@@ -23,7 +23,10 @@ type Renderer struct {
 	tileNode *wgpu.Buffer
 	nx, ny   int
 
-	enc *Encoded
+	enc        *Encoded
+	lastFP     uint64
+	haveFrame  bool
+	dispatches int
 }
 
 func NewRenderer(w, h int) (*Renderer, error) {
@@ -58,15 +61,25 @@ func (r *Renderer) Resize(w, h int) error {
 	}
 	r.w, r.h = w, h
 	r.ras.w, r.ras.h = w, h
+	r.haveFrame = false
 	return nil
 }
 
 func (r *Renderer) Render(s *scene.Scene) error {
 	EncodeInto(r.enc, s, r.w, r.h)
+	if r.haveFrame && r.enc.Fingerprint == r.lastFP {
+		return nil
+	}
 	if err := r.upload(r.enc); err != nil {
 		return err
 	}
-	return r.ras.run(r.dev, r.target, r.segBuf, r.nodeBuf, r.tileOff, r.tileNode, r.stopBuf, r.nx, r.ny)
+	if err := r.ras.run(r.dev, r.target, r.segBuf, r.nodeBuf, r.tileOff, r.tileNode, r.stopBuf, r.nx, r.ny); err != nil {
+		return err
+	}
+	r.lastFP = r.enc.Fingerprint
+	r.haveFrame = true
+	r.dispatches++
+	return nil
 }
 
 func (r *Renderer) ReadRGBA() (*image.RGBA, error) { return r.target.readRGBA(r.dev) }

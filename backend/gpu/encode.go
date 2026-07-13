@@ -2,6 +2,7 @@ package gpu
 
 import (
 	"math"
+	"unsafe"
 
 	"github.com/stohirov/sukho/geom"
 	"github.com/stohirov/sukho/paint"
@@ -55,6 +56,7 @@ type Encoded struct {
 	Stops         []Stop
 	TileOffsets   []uint32
 	TileNodes     []uint32
+	Fingerprint   uint64
 
 	flatScratch []geom.Point
 	tileCursor  []uint32
@@ -104,6 +106,34 @@ func EncodeInto(e *Encoded, s *scene.Scene, w, h int) {
 	e.NTilesX = (w + tileSize - 1) / tileSize
 	e.NTilesY = (h + tileSize - 1) / tileSize
 	e.buildTileBins()
+	e.Fingerprint = e.fingerprint()
+}
+
+func (e *Encoded) fingerprint() uint64 {
+	fp := uint64(14695981039346656037)
+	dims := [2]uint32{uint32(e.Width), uint32(e.Height)}
+	fp = hashWords(fp, unsafe.Pointer(&dims[0]), 8)
+	if len(e.Segments) > 0 {
+		fp = hashWords(fp, unsafe.Pointer(&e.Segments[0]), len(e.Segments)*int(unsafe.Sizeof(e.Segments[0])))
+	}
+	if len(e.Nodes) > 0 {
+		fp = hashWords(fp, unsafe.Pointer(&e.Nodes[0]), len(e.Nodes)*int(unsafe.Sizeof(e.Nodes[0])))
+	}
+	if len(e.Stops) > 0 {
+		fp = hashWords(fp, unsafe.Pointer(&e.Stops[0]), len(e.Stops)*int(unsafe.Sizeof(e.Stops[0])))
+	}
+	return fp
+}
+
+func hashWords(fp uint64, p unsafe.Pointer, n int) uint64 {
+	const prime = 1099511628211
+	for _, w := range unsafe.Slice((*uint64)(p), n/8) {
+		fp = (fp ^ w) * prime
+	}
+	for _, c := range unsafe.Slice((*byte)(unsafe.Add(p, n&^7)), n&7) {
+		fp = (fp ^ uint64(c)) * prime
+	}
+	return fp
 }
 
 func (e *Encoded) buildTileBins() {
