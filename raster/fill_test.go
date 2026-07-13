@@ -77,6 +77,19 @@ func TestFillNonZeroOrigin(t *testing.T) {
 	}
 }
 
+func TestFillClampsInvalidPremultiplied(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	img.Pix[0], img.Pix[1], img.Pix[2], img.Pix[3] = 20, 60, 110, 255
+	r := NewRasterizer(1, 1)
+	r.FillPath(path.Rect(geom.RectXYWH(0, 0, 1, 1)), path.DefaultTolerance, geom.Identity())
+	r.Paint(img, color.NRGBA{255, 255, 255, 200}, NonZero)
+	got := img.RGBAAt(0, 0)
+
+	if got.R < 200 || got.G < 200 || got.B < 200 || got.A != 255 {
+		t.Fatalf("clamped blend = %v, want light opaque color", got)
+	}
+}
+
 func diff(a, b uint8) int {
 	d := int(a) - int(b)
 	if d < 0 {

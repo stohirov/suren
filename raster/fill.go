@@ -32,11 +32,21 @@ func (r *Rasterizer) Paint(dst *image.RGBA, c color.Color, rule FillRule) {
 		inv := 1 - fa/255
 		i := dst.PixOffset(px, py)
 		s := dst.Pix[i : i+4 : i+4]
-		s[0] = uint8(sr*cov + float64(s[0])*inv + 0.5)
-		s[1] = uint8(sg*cov + float64(s[1])*inv + 0.5)
-		s[2] = uint8(sb*cov + float64(s[2])*inv + 0.5)
-		s[3] = uint8(fa + float64(s[3])*inv + 0.5)
+		s[0] = clamp8(sr*cov + float64(s[0])*inv)
+		s[1] = clamp8(sg*cov + float64(s[1])*inv)
+		s[2] = clamp8(sb*cov + float64(s[2])*inv)
+		s[3] = clamp8(fa + float64(s[3])*inv)
 	})
+}
+
+func clamp8(v float64) uint8 {
+	if v <= 0 {
+		return 0
+	}
+	if v >= 255 {
+		return 255
+	}
+	return uint8(v + 0.5)
 }
 
 func Fill(dst *image.RGBA, p path.Path, m geom.Matrix, c color.Color, rule FillRule) {
