@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
-	"github.com/stohirov/sukho/backend/png"
+	"github.com/stohirov/sukho/backend/cpu"
 	"github.com/stohirov/sukho/render"
 )
 
@@ -15,7 +15,7 @@ type game struct {
 	frame    func(*render.Canvas)
 	canvas   *render.Canvas
 	img      *image.RGBA
-	renderer *png.Renderer
+	renderer *cpu.Renderer
 
 	frames int
 	acc    time.Duration
@@ -29,7 +29,7 @@ func Run(title string, w, h int, frame func(*render.Canvas)) error {
 		frame:    frame,
 		canvas:   render.NewCanvas(),
 		img:      img,
-		renderer: &png.Renderer{Img: img},
+		renderer: &cpu.Renderer{Img: img},
 	}
 	ebiten.SetWindowSize(w, h)
 	ebiten.SetWindowTitle(title)

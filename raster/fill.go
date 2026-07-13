@@ -3,6 +3,7 @@ package raster
 import (
 	"image"
 	"image/color"
+	"math"
 
 	"github.com/stohirov/sukho/geom"
 	"github.com/stohirov/sukho/path"
@@ -46,17 +47,79 @@ func (r *Rasterizer) paintShaderClip(dst *image.RGBA, sh Shader, rule FillRule, 
 		if !(image.Point{X: px, Y: py}).In(clip) {
 			return
 		}
-
-		sr, sg, sb, sa := sh.RGBA(px, py)
-		fa := sa * cov
-		inv := 1 - fa/255
-		i := dst.PixOffset(px, py)
-		s := dst.Pix[i : i+4 : i+4]
-		s[0] = clamp8(sr*cov + float64(s[0])*inv)
-		s[1] = clamp8(sg*cov + float64(s[1])*inv)
-		s[2] = clamp8(sb*cov + float64(s[2])*inv)
-		s[3] = clamp8(fa + float64(s[3])*inv)
+		blend(dst, px, py, sh, cov)
 	})
+}
+
+func blend(dst *image.RGBA, px, py int, sh Shader, cov float64) {
+	sr, sg, sb, sa := sh.RGBA(px, py)
+	fa := sa * cov
+	inv := 1 - fa/255
+	i := dst.PixOffset(px, py)
+	s := dst.Pix[i : i+4 : i+4]
+	s[0] = clamp8(sr*cov + float64(s[0])*inv)
+	s[1] = clamp8(sg*cov + float64(s[1])*inv)
+	s[2] = clamp8(sb*cov + float64(s[2])*inv)
+	s[3] = clamp8(fa + float64(s[3])*inv)
+}
+
+func (r *Rasterizer) FillPaint(dst *image.RGBA, p path.Path, m geom.Matrix, sh Shader, rule FillRule, clip image.Rectangle) {
+	if r.w == 0 || r.h == 0 {
+		return
+	}
+	b := dst.Bounds()
+	shift := geom.Translate(float64(-b.Min.X), float64(-b.Min.Y)).Mul(m)
+
+	pb := p.TransformedBounds(shift)
+	ax0 := clampInt(int(math.Floor(pb.Min.X)), 0, r.w)
+	ax1 := clampInt(int(math.Floor(pb.Max.X))+1, 0, r.w)
+	ay0 := clampInt(int(math.Floor(pb.Min.Y)), 0, r.h)
+	ay1 := clampInt(int(math.Ceil(pb.Max.Y)), 0, r.h)
+	if ax0 >= ax1 || ay0 >= ay1 {
+		return
+	}
+
+	r.FillPath(p, path.DefaultTolerance, shift)
+
+	clip = clip.Intersect(b)
+	px0 := max(ax0, clip.Min.X-b.Min.X)
+	px1 := min(ax1, clip.Max.X-b.Min.X)
+	py0 := max(ay0, clip.Min.Y-b.Min.Y)
+	py1 := min(ay1, clip.Max.Y-b.Min.Y)
+
+	for y := py0; y < py1; y++ {
+		row := y * r.w
+		acc := 0.0
+		for x := ax0; x < px1; x++ {
+			acc += r.cover[row+x]
+			if x < px0 {
+				continue
+			}
+			alpha := coverage(acc-r.area[row+x]/2, rule)
+			if r.Binary {
+				if alpha >= 0.5 {
+					alpha = 1
+				} else {
+					alpha = 0
+				}
+			}
+			if alpha > 0 {
+				blend(dst, b.Min.X+x, b.Min.Y+y, sh, alpha)
+			}
+		}
+	}
+
+	r.resetRegion(ax0, ax1, ay0, ay1)
+}
+
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
 
 func clamp8(v float64) uint8 {

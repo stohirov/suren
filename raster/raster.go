@@ -32,6 +32,27 @@ func (r *Rasterizer) Reset() {
 	clear(r.area)
 }
 
+func (r *Rasterizer) Resize(w, h int) {
+	w, h = max(w, 0), max(h, 0)
+	n := w * h
+	if cap(r.cover) < n {
+		r.cover = make([]float64, n)
+		r.area = make([]float64, n)
+	} else {
+		r.cover = r.cover[:n]
+		r.area = r.area[:n]
+	}
+	r.w, r.h = w, h
+}
+
+func (r *Rasterizer) resetRegion(x0, x1, y0, y1 int) {
+	for y := y0; y < y1; y++ {
+		row := y * r.w
+		clear(r.cover[row+x0 : row+x1])
+		clear(r.area[row+x0 : row+x1])
+	}
+}
+
 func (r *Rasterizer) Line(p0, p1 geom.Point) {
 	if r.w == 0 || r.h == 0 {
 		return

@@ -102,6 +102,14 @@ func (p Path) Bounds() geom.Rect {
 	return r
 }
 
+func (p Path) TransformedBounds(m geom.Matrix) geom.Rect {
+	var r geom.Rect
+	for _, pt := range p.points {
+		r = r.ExpandToInclude(m.Apply(pt))
+	}
+	return r
+}
+
 type Iterator struct {
 	verbs  []Verb
 	points []geom.Point
