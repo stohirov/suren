@@ -122,29 +122,182 @@ threads. Parity: sample Δ=1, many-nodes Δ=0, clip Δ=0.
 **Result:** GPU matches CPU on the gradient sample scene (Δ=1, 8-bit quantization
 only); solid/many-nodes/clip parity unchanged (Δ=1/0/0).
 
-## Future work (post-parity)
+---
 
-- **Windowed present:** glfw + wgpu surface (`present.go`), verified on-device (needs a
-  display). Interim bridge: feed `ReadRGBA()` into the existing Ebiten window.
-- **Buffer reuse for static scenes:** encode is ~22% of the GPU frame (~0.65 ms);
-  cache/diff encoded buffers when the scene is unchanged.
-- **Coarse segment lists:** each tile currently re-iterates a node's *full* segment
-  list for the backdrop — fine for typical scenes, poor for one huge many-segment path
-  spanning many tiles. A coarse pass with precomputed per-tile segment lists +
-  backdrops (the Vello answer) removes the redundancy.
-- **GPU-side stroke expansion / flattening** if CPU encode becomes the bottleneck.
+# Future implementations (post-parity roadmap)
+
+Parity is done: the GPU renderer matches the CPU reference on solid, gradient, clip, and
+many-node scenes. What remains turns that correct offscreen rasterizer into a real-time,
+scalable, feature-complete renderer. Phases are ordered by value and dependency; within
+each, the parity/roundtrip tests stay the safety net that let every prior rewrite land.
+
+**Dependency sketch:**
+
+```
+Phase 6 (present) ─┬─ needs 6a target/rasterizer Resize ──► reused by 7a buffer reuse
+                   └─ 6b native surface (on-device only)
+Phase 7 (frame cost) ── independent of 6, but makes 6 worth watching (fast frames)
+Phase 8 (coarse lists) ── needs Phase 7's EncodeInto scratch reuse to stay cheap
+Phase 9 (GPU flatten/stroke) ── gated on Phase 8 diagnosis: only if CPU encode dominates
+Phase 10 (feature parity: blend modes, path clips) ── touches BOTH cpu + gpu + wgsl
+```
+
+## Phase 6 — windowed present (real-time on screen)  ⏳ next
+
+The whole motivation was the CPU window's ~14 ms/frame. The GPU renders offscreen today;
+this phase puts it on a live surface. Ship in two steps so a regression is visible early.
+
+### 6a — interim bridge through the existing Ebiten window
+
+- [ ] Add a `gpu`-backed variant of `backend/window`: per frame, `Render(scene)` →
+      `Sync()` → `ReadRGBA()` → `screen.WritePixels`. No new cgo dep, no display-surface
+      code — reuses the proven readback path (`target.readRGBA`, `align256`).
+- [ ] Extend `game.logTiming` to label CPU vs GPU so the two backends compare in one run.
+- [ ] Add `target.resize(d, w, h)` + `rasterizer` w/h update so a window resize
+      reallocates the storage texture, readback buffer, and dims uniform (today
+      `NewRenderer(w,h)` fixes size). Wire `Renderer.Resize(w,h)`.
+
+**Done when:** the sample scene animates in a window driven by the GPU renderer; per-frame
+time logged and compared against the CPU backend. Accepts one GPU→CPU→GPU roundtrip (the
+readback) — removed in 6b.
+
+### 6b — native wgpu surface present (`present.go`, on-device)
+
+- [ ] glfw window + `wgpu.Surface`; configure a swapchain (surface format is typically
+      `BGRA8UnormSrgb` — record it, don't assume RGBA). Quarantine glfw behind a build tag
+      (`//go:build gpupresent`) so the default/headless build and CI test binary never link
+      a display library.
+- [ ] The compute shader writes a `storage<rgba8unorm, write>` texture; swapchain images
+      are `RenderAttachment`, **not** storage-writable. So: compute into the offscreen
+      target as today, then a tiny fullscreen-triangle **blit pipeline** (sample offscreen
+      tex → surface, handling the RGBA→BGRA/sRGB format difference) writes the frame. This
+      blit is the new bit; the raster path is unchanged.
+- [ ] Present loop: acquire next surface texture → dispatch compute → blit render pass →
+      present; on resize, reconfigure the surface **and** call `target.resize` from 6a.
+- [ ] Manual on-device validation (sandbox/CI have no display): render the sample scene to
+      a real window, screenshot, eyeball against the offscreen PNG.
+
+**Done when:** the sample scene presents directly from GPU memory with no readback, on
+darwin/arm64 (Metal). CI still gates on the offscreen parity tests, not the window.
+
+## Phase 7 — kill per-frame cost (buffer reuse for static & animated scenes)
+
+Every `Render` today runs `Encode` (fresh Go slices), `releaseBuffers`, then recreates all
+five GPU buffers via `CreateBufferInit`. Encode is ~22% of the frame (~0.65 ms) and buffer
+churn adds more. Three independent wins, cheapest first.
+
+### 7a — reuse GPU buffers in place
+
+- [ ] Instead of release+recreate each frame, keep the five `*wgpu.Buffer`s and
+      `queue.WriteBuffer` into them when the new byte length fits; only recreate (grow,
+      with some slack) when it doesn't. Removes per-frame buffer allocation for
+      steady-state scenes regardless of content. Requires the buffers carry
+      `BufferUsageCopyDst`.
+
+### 7b — reuse encoder scratch (no per-frame Go allocation)
+
+- [ ] `EncodeInto(e *Encoded, s, w, h)`: reset slice lengths, keep capacity, append into
+      the retained `Encoded`. `Renderer` owns one `Encoded`. Mirrors the CPU engine's
+      "reuse one `Rasterizer`" win from Phase 1. Confirm with `-benchmem` that the encode
+      benchmark drops to ~0 allocs/op.
+
+### 7c — skip work when the scene is unchanged
+
+- [ ] Fingerprint the encoded scene (fnv/xxhash over the flattened `Segments`+`Nodes`+
+      `Stops` bytes, computed during `EncodeInto`). If it matches the last frame's:
+      skip re-upload; optionally skip the dispatch entirely and re-present the last
+      texture (in 6b, just present the existing swapchain-blit source). Biggest win for
+      truly static or partially-static UIs.
+- [ ] Note the trade: hashing the byte buffers is O(scene) but far cheaper than upload +
+      dispatch. Measure that it's a net win before keeping it.
+
+**Done when:** `BenchmarkEncodeManyNodes` reports ~0 allocs/op; `BenchmarkGPUManyNodes`
+improves on the steady-state (unchanged-scene) path; parity tests unchanged.
+
+## Phase 8 — coarse segment lists (scalability for complex paths)
+
+The known weak spot: each tile re-iterates a node's **full** segment list to route the
+backdrop (`routeSeg` early-outs by x but still loops every segment). For a single huge
+many-segment path spanning many tiles that's O(tiles × segments) redundant work — the
+Vello coarse-pass answer removes it.
+
+- [ ] **Measure first.** Build a pathological `sample` scene (one path, thousands of
+      segments, covering most tiles) and a benchmark; quantify the redundancy against the
+      typical many-nodes scene. Only invest if the slowdown is real on realistic inputs.
+- [ ] **Coarse pass** producing, per tile: the list of segments that actually intersect it
+      **and** a precomputed backdrop (winding from segments entirely left of the tile) so
+      the fine shader seeds its accumulator without re-scanning left-of-tile geometry.
+      Start CPU-side in `Encode` for a correctness baseline (extend `buildTileBins` to emit
+      per-tile segment ranges + backdrops); move to a GPU compute coarse pass if the CPU
+      cost shows up (the real Vello architecture: path → coarse → tile → fine).
+- [ ] Fine shader (`raster.wgsl`) consumes per-tile segment lists + stored backdrop instead
+      of iterating `nd.segStart..segCount`.
+- [ ] Watch memory: a segment crossing N tiles is referenced N times — bound it, and
+      `log`/document any cap rather than silently truncating.
+
+**Done when:** parity holds (Δ within tolerance) on the pathological scene **and** all
+existing scenes, with a measured speedup on the many-segment case and no regression on
+typical scenes.
+
+## Phase 9 — GPU-side flattening / stroke expansion (only if encode dominates)
+
+Today `strokeOutline` (CPU) expands strokes to fill outlines and `appendSegments` flattens
+curves to line segments on CPU. Gated strictly on measurement — currently encode is ~22%
+and strokes are a fraction of that.
+
+- [ ] **Flattening on GPU:** upload curve control points instead of pre-flattened
+      segments; a compute pass does adaptive subdivision to tolerance → segment buffer.
+      Do this first — it's the mechanical half and directly shrinks encode for curve-heavy
+      scenes.
+- [ ] **Stroke expansion on GPU:** the hard half (joins, caps, miters, dashes on GPU).
+      Large undertaking; defer until flattening proves the CPU path is the bottleneck for
+      stroke-heavy scenes.
+
+**Done when:** `BenchmarkEncode*` shows encode as the frame bottleneck for a curve-/stroke-
+heavy scene, and moving flattening to GPU measurably reduces total frame time at parity.
+
+## Phase 10 — renderer feature parity beyond opaque fills
+
+These are engine features the CPU side also lacks or only partially has; each must land on
+**both** renderers with a parity test, not GPU-only.
+
+- [ ] **Blend modes.** `scene.Node.Op` (`paint.BlendMode`) exists but only src-over is
+      implemented on either side. Implement the mode table in `raster.wgsl` and mirror it
+      in `raster/fill.go`'s `blend`; parity per mode.
+- [ ] **Arbitrary-path clips.** Clips are rectangles today (`geom.Rect`, matched on both
+      sides). True path clips need a coverage/mask approach (clip as a coverage buffer the
+      fine shader multiplies in), with nesting. This is a renderer feature, sequenced after
+      Phase 8's coarse infrastructure which the mask can reuse.
+- [ ] **Colorspace / sRGB correctness** once 6b introduces an sRGB surface: confirm the
+      linear-premultiplied compositing still matches the CPU `image.RGBA` path end to end.
+
+**Done when:** each feature renders identically (within tolerance) on CPU and GPU via a
+dedicated parity scene.
+
+## Cross-cutting (fold into the phases above, not standalone work)
+
+- **Dynamic resize** — introduced in 6a (`target.resize`), consumed by 6b's surface
+  reconfigure; the renderer must never assume a fixed `w,h` after construction.
+- **Device-loss / error surface** — wire wgpu's uncaptured-error callback and return
+  errors from `Render` rather than logging; relevant once a long-lived present loop exists.
+- **Huge canvases** — a canvas exceeding the max 2D texture size needs framebuffer tiling
+  (render in texture-sized chunks). Note now; implement only when a real target needs it.
 
 ---
 
 ## Testing strategy
 
 - **GPU/CPU parity** is the primary correctness gate: same scene both renderers, raw
-  premultiplied RGBA diff within tolerance (solid, many-nodes, clip; gradients next).
+  premultiplied RGBA diff within tolerance (solid, many-nodes, clip, gradient today; add a
+  pathological many-segment scene in Phase 8, per-mode blend and path-clip scenes in
+  Phase 10).
 - **Encoder unit tests** (pure Go, no GPU): node/segment/stop counts, kinds, bbox,
-  clip flags, tile-bin structure.
+  clip flags, tile-bin structure; extend to per-tile segment ranges + backdrops in Phase 8.
 - **Headless GPU roundtrip** (`TestDeviceInit`, offscreen render + readback) so the
-  full pipeline is exercised without a display.
-- **GPU-vs-CPU benchmark** on a shared many-nodes scene; encode measured separately.
+  full pipeline is exercised without a display. Stays the CI gate — windowed present (6b)
+  is validated manually on-device only.
+- **Benchmarks** — `-benchmem` guards Phase 7 (allocs/op → ~0; steady-state frame time);
+  a dedicated many-segment benchmark guards Phase 8; encode-heavy scenes gate Phase 9.
 
 ## Risk register
 
@@ -154,13 +307,21 @@ only); solid/many-nodes/clip parity unchanged (Δ=1/0/0).
 | cgo/native dep won't build or run headless | spiked before committing — Metal device confirmed headless; dep quarantined in its own module |
 | No display in CI/sandbox | validate offscreen (readback); windowed present is on-device only |
 | Tiling breaks winding across tile edges | backdrop routing + clip-across-tiles parity test |
-| Per-frame encode becomes the bottleneck | measured (~22%); buffer reuse / GPU flattening planned |
-| Huge many-segment path × many tiles (backdrop re-iteration) | acceptable now; coarse per-tile segment lists planned |
+| Per-frame encode becomes the bottleneck | measured (~22%); Phase 7 buffer/scratch reuse, Phase 9 GPU flattening |
+| Huge many-segment path × many tiles (backdrop re-iteration) | acceptable now; Phase 8 coarse per-tile segment lists |
+| Swapchain image not storage-writable (can't compute into surface) | Phase 6b computes offscreen then blits via a fullscreen render pass |
+| Surface format is BGRA/sRGB, not linear RGBA | record the surface format; the blit shader handles the conversion; verify colorspace parity (Phase 10) |
+| glfw drags a display dep into headless builds/CI | quarantine behind `//go:build gpupresent`; default build and test binary never link it |
+| Window resize invalidates fixed-size target | `target.resize` (6a) reallocates texture/readback/dims; surface reconfigured on resize (6b) |
+| Static-scene fingerprint costs more than it saves | Phase 7c: measure hash cost vs upload+dispatch; keep only if net win |
 
 ## Critical files
 
 - `render/render.go` — `Renderer` interface, the CPU/GPU seam
 - `backend/cpu/cpu.go` + `raster/fill.go` — CPU reference the GPU must match
-- `backend/gpu/encode.go` — scene → GPU buffers + tile bins
-- `backend/gpu/raster.wgsl` — the fine rasterizer (ported signed-area coverage + backdrop)
-- `backend/gpu/renderer.go` — encode → upload → dispatch, `render.Renderer` impl
+- `backend/gpu/encode.go` — scene → GPU buffers + tile bins (Phase 7 `EncodeInto`, Phase 8 coarse lists)
+- `backend/gpu/raster.wgsl` — the fine rasterizer (Phase 8 per-tile lists, Phase 10 blend/clip)
+- `backend/gpu/renderer.go` — encode → upload → dispatch (Phase 6 `Resize`, Phase 7 buffer reuse)
+- `backend/gpu/target.go` — offscreen texture + readback (Phase 6a `resize`)
+- `backend/gpu/present.go` — glfw surface + blit present (Phase 6b, new; `gpupresent` build tag)
+- `backend/window/window.go` — window loop; gains a GPU-backed variant (Phase 6a)
