@@ -303,14 +303,26 @@ and strokes are a fraction of that.
 **Done when:** `BenchmarkEncode*` shows encode as the frame bottleneck for a curve-/stroke-
 heavy scene, and moving flattening to GPU measurably reduces total frame time at parity.
 
-## Phase 10 — renderer feature parity beyond opaque fills
+## Phase 10 — renderer feature parity beyond opaque fills  ⏳ in progress
 
 These are engine features the CPU side also lacks or only partially has; each must land on
 **both** renderers with a parity test, not GPU-only.
 
-- [ ] **Blend modes.** `scene.Node.Op` (`paint.BlendMode`) exists but only src-over is
-      implemented on either side. Implement the mode table in `raster.wgsl` and mirror it
-      in `raster/fill.go`'s `blend`; parity per mode.
+### Blend modes  ✅ `19e3ba3`
+
+- [x] Added the W3C separable set to `paint.BlendMode` (Multiply, Screen, Overlay, Darken,
+      Lighten, ColorDodge, ColorBurn, HardLight, SoftLight, Difference, Exclusion; SrcOver=0).
+      Mirrored the enum in `raster` (like `FillRule`). Both renderers composite in the same
+      premultiplied space, so the general path unpremultiplies → applies the separable blend
+      `B(Cb,Cs)` → recomposes via the W3C formula `Co = αs(1-αb)Cs + αs·αb·B + (1-αs)αb·Cb`;
+      `SrcOver` keeps the original fast premultiplied path on both sides.
+- [x] `raster/fill.go` `blend` (f64) and `raster.wgsl` `composite`/`blendCh` (f32) are line-for-line
+      the same formula; encoder passes `Node.Op` in the previously-unused `Node.Flags`. `Canvas.SetBlend`
+      exposes it (Save/Restore-scoped state, zero value = SrcOver).
+- [x] `TestParityBlendModes`: per-mode CPU-vs-GPU on `sample.BlendScene` (opaque / translucent /
+      empty backdrop regions so αb spans its range). 10/12 modes **Δ≤1**; the two division-based
+      modes (ColorDodge/ColorBurn) **Δ≤3** — f32-vs-f64 divergence at the `min(1,·)` clamp on
+      4/172800 channels, a precision artifact absorbed by tolerance, not a logic error.
 - [ ] **Arbitrary-path clips.** Clips are rectangles today (`geom.Rect`, matched on both
       sides). True path clips need a coverage/mask approach (clip as a coverage buffer the
       fine shader multiplies in), with nesting. This is a renderer feature, sequenced after
@@ -319,7 +331,7 @@ These are engine features the CPU side also lacks or only partially has; each mu
       linear-premultiplied compositing still matches the CPU `image.RGBA` path end to end.
 
 **Done when:** each feature renders identically (within tolerance) on CPU and GPU via a
-dedicated parity scene.
+dedicated parity scene. (Blend modes ✅; path clips and sRGB remain.)
 
 ## Cross-cutting (fold into the phases above, not standalone work)
 
