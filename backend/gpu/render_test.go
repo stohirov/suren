@@ -5,12 +5,9 @@ import (
 	"testing"
 
 	"github.com/stohirov/sukho/backend/cpu"
-	"github.com/stohirov/sukho/geom"
+	"github.com/stohirov/sukho/internal/corpus"
 	"github.com/stohirov/sukho/internal/parity"
 	"github.com/stohirov/sukho/internal/sample"
-	"github.com/stohirov/sukho/paint"
-	"github.com/stohirov/sukho/path"
-	"github.com/stohirov/sukho/render"
 	"github.com/stohirov/sukho/scene"
 )
 
@@ -42,59 +39,12 @@ func gpuParity(t *testing.T, want *image.RGBA, sc *scene.Scene, cfg parity.Confi
 	parity.Assert(t, got, want, cfg)
 }
 
-func TestParitySolid(t *testing.T) {
-	gpuParity(t, cpu.Render(sample.Scene(), sample.W, sample.H), sample.Scene(), parity.Quantized())
-}
-
-func TestParityManyNodes(t *testing.T) {
-	const w, h = 640, 360
-	gpuParity(t, cpu.Render(sample.ManyNodes(w, h, 40, 24), w, h), sample.ManyNodes(w, h, 40, 24), parity.Identical())
-}
-
-func TestParityGradient(t *testing.T) {
-	gpuParity(t, cpu.Render(sample.GradientScene(), sample.W, sample.H), sample.GradientScene(), parity.Quantized())
-}
-
-func TestParityBlendModes(t *testing.T) {
-	modes := []struct {
-		name string
-		op   paint.BlendMode
-		cfg  parity.Config
-	}{
-		{"SrcOver", paint.SrcOver, parity.Quantized()},
-		{"Multiply", paint.Multiply, parity.Quantized()},
-		{"Screen", paint.Screen, parity.Quantized()},
-		{"Overlay", paint.Overlay, parity.Quantized()},
-		{"Darken", paint.Darken, parity.Quantized()},
-		{"Lighten", paint.Lighten, parity.Quantized()},
-		{"ColorDodge", paint.ColorDodge, parity.Budget(2, "cb/(1-cs) division diverges at the min(1,·) clamp in f32 vs f64")},
-		{"ColorBurn", paint.ColorBurn, parity.Budget(3, "(1-cb)/cs division diverges at the min(1,·) clamp in f32 vs f64")},
-		{"HardLight", paint.HardLight, parity.Quantized()},
-		{"SoftLight", paint.SoftLight, parity.Quantized()},
-		{"Difference", paint.Difference, parity.Quantized()},
-		{"Exclusion", paint.Exclusion, parity.Quantized()},
-	}
-	for _, m := range modes {
-		t.Run(m.name, func(t *testing.T) {
-			gpuParity(t, cpu.Render(sample.BlendScene(m.op), sample.W, sample.H), sample.BlendScene(m.op), m.cfg)
+func TestParityCorpus(t *testing.T) {
+	for _, e := range corpus.All() {
+		t.Run(e.Name, func(t *testing.T) {
+			gpuParity(t, cpu.Render(e.Build(), e.W, e.H), e.Build(), e.Tol)
 		})
 	}
-}
-
-func TestParityClipPath(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		nested bool
-	}{{"single", false}, {"nested", true}} {
-		t.Run(tc.name, func(t *testing.T) {
-			gpuParity(t, cpu.Render(sample.ClipPathScene(tc.nested), sample.W, sample.H), sample.ClipPathScene(tc.nested), parity.Quantized())
-		})
-	}
-}
-
-func TestParityManySegments(t *testing.T) {
-	const w, h = 400, 300
-	gpuParity(t, cpu.Render(sample.ManySegments(w, h, 300), w, h), sample.ManySegments(w, h, 300), parity.Quantized())
 }
 
 func TestResizeParity(t *testing.T) {
@@ -106,7 +56,7 @@ func TestResizeParity(t *testing.T) {
 	}
 	defer r.Release()
 
-	if err := r.Render(clipScene()); err != nil {
+	if err := r.Render(sample.ClipRectScene()); err != nil {
 		t.Fatalf("render at initial size: %v", err)
 	}
 
@@ -157,11 +107,11 @@ func TestUnchangedSceneSkips(t *testing.T) {
 		return true
 	}
 
-	a1 := read(clipScene())
+	a1 := read(sample.ClipRectScene())
 	if r.dispatches != 1 {
 		t.Fatalf("first render dispatches = %d, want 1", r.dispatches)
 	}
-	a2 := read(clipScene())
+	a2 := read(sample.ClipRectScene())
 	if r.dispatches != 1 {
 		t.Fatalf("unchanged re-render dispatched (%d), want skip", r.dispatches)
 	}
@@ -177,23 +127,11 @@ func TestUnchangedSceneSkips(t *testing.T) {
 		t.Fatal("different scenes produced identical pixels")
 	}
 
-	a3 := read(clipScene())
+	a3 := read(sample.ClipRectScene())
 	if r.dispatches != 3 {
 		t.Fatalf("returning to prior scene skipped: dispatches = %d, want 3", r.dispatches)
 	}
 	if !equal(a1, a3) {
 		t.Fatal("re-render of original scene diverged")
 	}
-}
-
-func clipScene() *scene.Scene {
-	c := render.NewCanvas()
-	c.FillColor(path.Rect(geom.RectXYWH(0, 0, 96, 96)), paint.FromRGBA8(30, 30, 40, 255))
-	c.ClipRect(geom.RectXYWH(13, 13, 61, 47))
-	c.FillColor(path.Circle(geom.Pt(48, 48), 40), paint.FromRGBA8(220, 80, 60, 255))
-	return c.Scene()
-}
-
-func TestParityClip(t *testing.T) {
-	gpuParity(t, cpu.Render(clipScene(), 96, 96), clipScene(), parity.Identical())
 }

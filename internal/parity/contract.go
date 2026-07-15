@@ -46,9 +46,27 @@
 // Perceptual (ΔE + SSIM over sRGB→Lab) exists only for features where exactness
 // is provably unreachable — image resampling with f32 kernels, mesh-gradient
 // patch interpolation. It never REPLACES Exact; it is a second gate for a named
-// subset, and wherever it is used the Exact failure that forced it is recorded.
-// Perceptual is declared here but implemented in Phase 12a; Compare rejects it
-// until then rather than silently passing.
+// subset, and wherever it is used the Exact failure that forced it is recorded,
+// which is why Perceptual requires a Why just as Budget does.
+//
+// The perceptual gate has three parts, because ΔE alone would not be sound here:
+//
+//   - ΔE is measured over the frame composited against opaque black. The
+//     premultiplied RGB IS that composite, so this is a total function — no
+//     unpremultiply division, no undefined color at alpha 0, and no divergence
+//     amplified by a small alpha.
+//   - Compositing over black makes two pixels that differ ONLY in alpha
+//     (transparent black vs opaque black) indistinguishable to ΔE, so alpha is
+//     gated separately by Tol.
+//   - SSIM (luma, 11×11 Gaussian σ=1.5, Wang et al.) catches structural drift
+//     that a per-pixel color metric averages away.
+//
+// ΔE is CIE76, not CIEDE2000. CIE76 is known to overestimate distance for
+// saturated colors, which is a defect when ranking arbitrary color pairs but not
+// when gating two renders that should already be near-identical: in that regime
+// it can only be stricter than CIEDE2000, and a stricter gate cannot admit a
+// divergence CIEDE2000 would have caught. Upgrade to CIEDE2000 if a real feature
+// ever needs finer discrimination than "these should be nearly the same".
 //
 // # The AA contract
 //
@@ -69,15 +87,15 @@ import "fmt"
 type Mode int
 
 const (
-	Exact Mode = iota
-	Perceptual
+	ModeExact Mode = iota
+	ModePerceptual
 )
 
 func (m Mode) String() string {
 	switch m {
-	case Exact:
+	case ModeExact:
 		return "exact"
-	case Perceptual:
+	case ModePerceptual:
 		return "perceptual"
 	}
 	return fmt.Sprintf("Mode(%d)", int(m))
@@ -86,31 +104,58 @@ func (m Mode) String() string {
 const QuantizationFloor = 1
 
 type Config struct {
-	Mode Mode
-	Tol  int
-	Why  string
+	Mode      Mode
+	Tol       int
+	MaxDeltaE float64
+	MinSSIM   float64
+	Why       string
 }
 
-func Identical() Config { return Config{Mode: Exact, Tol: 0} }
+func Identical() Config { return Config{Mode: ModeExact, Tol: 0} }
 
-func Quantized() Config { return Config{Mode: Exact, Tol: QuantizationFloor} }
+func Quantized() Config { return Config{Mode: ModeExact, Tol: QuantizationFloor} }
 
 func Budget(tol int, why string) Config {
-	return Config{Mode: Exact, Tol: tol, Why: why}
+	return Config{Mode: ModeExact, Tol: tol, Why: why}
+}
+
+func Perceptual(maxDeltaE, minSSIM float64, why string) Config {
+	return Config{Mode: ModePerceptual, Tol: QuantizationFloor, MaxDeltaE: maxDeltaE, MinSSIM: minSSIM, Why: why}
 }
 
 func (c Config) Validate() error {
 	if c.Tol < 0 {
 		return fmt.Errorf("negative tolerance %d", c.Tol)
 	}
-	if c.Tol > QuantizationFloor && c.Why == "" {
-		return fmt.Errorf("tolerance %d exceeds the quantization floor (%d) without naming the operation responsible; use Budget(tol, why)", c.Tol, QuantizationFloor)
+	switch c.Mode {
+	case ModeExact:
+		if c.Tol > QuantizationFloor && c.Why == "" {
+			return fmt.Errorf("tolerance %d exceeds the quantization floor (%d) without naming the operation responsible; use Budget(tol, why)", c.Tol, QuantizationFloor)
+		}
+	case ModePerceptual:
+		if c.Why == "" {
+			return fmt.Errorf("perceptual mode without recording the exact-mode failure that forced it; use Perceptual(maxDeltaE, minSSIM, why)")
+		}
+		if c.MaxDeltaE <= 0 {
+			return fmt.Errorf("perceptual mode needs a positive MaxDeltaE, got %v", c.MaxDeltaE)
+		}
+		if c.MinSSIM <= 0 || c.MinSSIM > 1 {
+			return fmt.Errorf("perceptual mode needs MinSSIM in (0,1], got %v", c.MinSSIM)
+		}
+	default:
+		return fmt.Errorf("unknown mode %v", c.Mode)
 	}
 	return nil
 }
 
 func (c Config) String() string {
-	s := fmt.Sprintf("%s Δ≤%d", c.Mode, c.Tol)
+	var s string
+	switch c.Mode {
+	case ModePerceptual:
+		s = fmt.Sprintf("perceptual ΔE≤%g SSIM≥%g α≤%d", c.MaxDeltaE, c.MinSSIM, c.Tol)
+	default:
+		s = fmt.Sprintf("%s Δ≤%d", c.Mode, c.Tol)
+	}
 	if c.Why != "" {
 		s += ": " + c.Why
 	}

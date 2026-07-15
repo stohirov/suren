@@ -113,6 +113,14 @@ func ManySegments(w, h, spikes int) *scene.Scene {
 	return c.Scene()
 }
 
+func ClipRectScene() *scene.Scene {
+	c := render.NewCanvas()
+	c.FillColor(path.Rect(geom.RectXYWH(0, 0, 96, 96)), paint.FromRGBA8(30, 30, 40, 255))
+	c.ClipRect(geom.RectXYWH(13, 13, 61, 47))
+	c.FillColor(path.Circle(geom.Pt(48, 48), 40), paint.FromRGBA8(220, 80, 60, 255))
+	return c.Scene()
+}
+
 func ClipPathScene(nested bool) *scene.Scene {
 	c := render.NewCanvas()
 	c.FillColor(path.Rect(geom.RectXYWH(0, 0, W, H)), paint.FromRGBA8(28, 30, 38, 255))
