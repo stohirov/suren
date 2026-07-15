@@ -153,14 +153,23 @@ func clipRect(r *geom.Rect) (image.Rectangle, bool) {
 	), true
 }
 
-// nodeBounds is the node's device-space extent, padded by a pixel (and by the
-// stroke's half-width) so it covers every pixel the node's antialiased edge can
-// reach.
+// nodeBounds is the node's device-space extent, padded by a pixel and by the
+// furthest the stroke outline can escape the path. It must never underestimate:
+// both callers use it to DROP a node, so a bound that is too small deletes
+// geometry.
+//
+// The pad was the stroke's half-width until it was measured against
+// path.Stroker: a miter join reaches miterLimit*w/2 — 4x that by default — and a
+// square cap's corner reaches w/2*sqrt(2). The old bound was wrong by up to 8.9px
+// on a mitered V. It went unnoticed while culled() was the only caller, since
+// dropping a node needs its whole bbox off-canvas, but Phase 14's tileCulled
+// drops against a handful of flagged tiles, where a miter spike escaping into one
+// meant the CPU patch overwrote correct GPU pixels with geometry it had skipped.
 func nodeBounds(n scene.Node) geom.Rect {
 	b := n.Path.Transform(n.Transform).Bounds()
 	pad := 1.0
 	if n.Stroke != nil {
-		pad += n.Stroke.Width / 2 * n.Transform.MaxScale()
+		pad += n.Stroke.Stroker().MaxExtent() * n.Transform.MaxScale()
 	}
 	b.Min = b.Min.Sub(geom.Pt(pad, pad))
 	b.Max = b.Max.Add(geom.Pt(pad, pad))

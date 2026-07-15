@@ -36,6 +36,20 @@ func (s Stroker) miterLimit() float64 {
 	return 4
 }
 
+// MaxExtent is the furthest the outline can lie from the source path. A miter
+// reaches miterLimit*w/2, well past the w/2 a caller might assume.
+func (s Stroker) MaxExtent() float64 {
+	h := s.Width / 2
+	e := h
+	if s.Join == MiterJoin {
+		e = h * s.miterLimit()
+	}
+	if s.Cap == SquareCap {
+		e = math.Max(e, h*math.Sqrt2)
+	}
+	return e
+}
+
 func (s Stroker) Stroke(p Path, tol float64) Path {
 	var out Path
 	h := s.Width / 2
