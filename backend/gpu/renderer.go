@@ -32,8 +32,12 @@ type Renderer struct {
 	dispatches int
 }
 
-func NewRenderer(w, h int) (*Renderer, error) {
-	dev, err := NewDevice()
+func NewRenderer(w, h int) (*Renderer, error) { return NewRendererOn(Any, w, h) }
+
+// NewRendererOn pins the renderer to one native backend. It exists for the
+// portability harness (Phase 12d); production takes whatever NewRenderer picks.
+func NewRendererOn(b Backend, w, h int) (*Renderer, error) {
+	dev, err := NewDeviceOn(b)
 	if err != nil {
 		return nil, err
 	}
