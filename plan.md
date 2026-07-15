@@ -402,6 +402,9 @@ dedicated parity scene. (Blend modes ✅; path clips ✅; sRGB remains, gated on
 | "GPU parity" quietly means "parity on one laptop" | Phase 12d: reconciliation runs per named backend and **logs which ones it did not cover**; the claim is auditable from the test output |
 | A generated scene renders nothing and passes every gate vacuously | Phase 12c: opaque background by construction; `parity.NonTrivial` skips the residue; the skip rate itself is gated at 3% |
 | A fuzz find stops reproducing when the generator changes | Phase 12c: finds are stored as explicit `Spec` JSON, not seeds — a seed's scene shifted the moment two blend modes were excluded |
+| A feature that cannot be made exact forces a tolerance widening on every scene containing it | Phase 14: per-tile CPU fallback confines the remedy to the node's own tiles; corpus keeps the full-frame gate at `Identical()` |
+| A scene built to prove the fallback works is exact on GPU anyway, so the gate measures nothing | Phase 14: nearly shipped exactly this — the first probe was Δ=0 with the fallback off. Fixed by a node that diverges by measurement, and `TestFallbackBuysExactness` now asserts the off/on difference rather than the on result |
+| The fallback becomes the cheap general answer to "it's not exact" | Phase 14: priced at ~6µs/tile and recorded — full-frame fallback is ~14× a GPU frame and worse than the CPU backend. The benchmark reports `%frame` so a feature cannot quietly fall back on everything |
 
 ## Critical files
 
@@ -410,6 +413,8 @@ dedicated parity scene. (Blend modes ✅; path clips ✅; sRGB remains, gated on
 - `internal/corpus/corpus.go` — the named scene corpus (+ `regress/` for fuzz finds)
 - `internal/parity/fuzz/` — scene generator, shrinker, bisect (Phase 12c)
 - `backend/cpu/cpu.go` + `raster/fill.go` — CPU reference the GPU must match
+- `raster/tile.go` — `TileMask`: gates a fill's writes without touching its coverage sweep (Phase 14)
+- `backend/gpu/fallback.go` — per-tile CPU fallback + `Stats` (Phase 14)
 - `backend/gpu/encode.go` — scene → GPU buffers + tile bins (Phase 7 `EncodeInto`, Phase 8 coarse lists)
 - `backend/gpu/raster.wgsl` — the fine rasterizer (Phase 8 per-tile lists, Phase 10 blend/clip)
 - `backend/gpu/renderer.go` — encode → upload → dispatch (Phase 6 `Resize`, Phase 7 buffer reuse)
@@ -450,7 +455,8 @@ Section A (correctness machine)
 Section B (make exactness reachable)
   13 float determinism controls ✅ ── rounding pinned; what it could not control (FMA
      contraction) is named and handed to 12d
-  14 per-tile CPU fallback ── the escape hatch when 13 can't make a feature exact
+  14 per-tile CPU fallback ✅ ── the escape hatch when 13 can't make a feature exact;
+     priced at ~6µs/tile, so it is a local remedy and never a global one
 
 Section C (features — each uses A as its gate, B where exactness is at risk)
   15 Porter-Duff operators ─┐
@@ -861,20 +867,79 @@ against the tightened gates, no failures. Perf neutral within noise.
 residual Δ≥2 site named and justified. *The rounding rule is now pinned rather than driver-defined,
 which is what makes that question askable; the on-device Vulkan/DX12 half is 12d's.*
 
-### Phase 14 — per-tile CPU fallback for inexact GPU features  ⏳ planned
+### Phase 14 — per-tile CPU fallback for inexact GPU features  ✅
 
-- [ ] Some features may resist bit-exactness on GPU (image resampling with hardware-filtered
-      samplers, mesh-gradient patch interpolation). Rather than widen tolerance globally, allow a
-      **per-tile fallback**: the encoder flags tiles that touch a fallback-marked node; those tiles
-      are rasterized by the CPU reference path and their pixels written into the GPU target before
-      present. Exact tiles stay on GPU.
-- [ ] The seam already exists (both backends share `scene.Scene` and produce premultiplied RGBA);
-      the work is a tile-mask handshake in `renderer.go` + a partial-`cpu.Render` that fills only
-      flagged tiles. Fallback is **opt-in per feature**, logged, and counted (so "how much of the
-      frame fell back" is observable via Section D).
+**The escape hatch works and is priced. The headline is the price:** a fallback tile costs ~6µs, so
+the mechanism is only ever worth it for a *small* node — at full coverage it is ~14× a GPU frame and
+strictly worse than just using the CPU backend. It buys exactness locally, not globally, and that
+number is what keeps a future feature from reaching for it as a general answer.
+
+- [x] **The handshake.** `scene.Node.Fallback` marks a node; `encode.go` flags the tiles its bbox
+      reaches (`markFallbackTiles`, reusing the binner's own `tileRange`, so a node's fallback tiles
+      and its GPU bins agree by construction); `backend/gpu/fallback.go` renders the flagged tiles
+      with the CPU reference and `queue.WriteTexture`s them over the compute pass's output, before
+      any readback or present, so the offscreen and (6b) windowed paths both see patched pixels.
+      Runs of flagged tiles upload as one region per tile row. **No shader change**: the GPU still
+      rasterizes flagged tiles and is simply overwritten. Skipping them on-device is a perf idea, not
+      a correctness one, and it is not worth a tenth binding until something measures it.
+- [x] **Why a tile, not a node.** The CPU pass renders the *whole scene* into the flagged tiles, not
+      just the fallback node. Blending the CPU's node over the GPU's tile would composite it onto a
+      backdrop the two backends had already quantized differently — exactly Phase 13's Finding 1,
+      re-created one layer up. A tile is a complete composite of the scene restricted to its area, so
+      replacing it wholesale cannot leave a seam.
+- [x] **The exactness argument, and where it actually lives.** `raster.TileMask` gates the *write*;
+      `FillPaint`'s coverage sweep still starts at each path's own left edge and accumulates through
+      masked-out columns before reaching a live one. So masked pixels are bit-identical to a full
+      render's, rather than merely close. This was **already true of the existing `clip` parameter** —
+      the partial render is a use the rasterizer's shape allowed for, not new machinery. Narrowing the
+      sweep instead would have been the obvious optimization and would have quietly broken it.
+- [x] **Measured, two-sided.** `sample.FallbackScene` is a frame of pixel-aligned solids (Δ=0, the
+      `BlendStack` reason) around one radial-gradient circle, marked. Fallback **off → Δ=1, on → Δ=0**,
+      12 of 48 tiles. Both entries are in the corpus and `TestFallbackBuysExactness` asserts the
+      *difference*, so the Δ=0 gate cannot pass vacuously on a backend that was exact anyway.
+      **The first draft of that scene did exactly that** — a pixel-aligned rect with a 2-stop linear
+      ramp rendered at Δ=0 on Metal with the fallback off, and the gate would have been decorative.
+      The radial gradient's division and the circle's AA edges are what make the divergence reliable;
+      the near-miss is why the vacuity check is a test rather than a comment.
+- [x] **Mutation-tested, and it found the honest shape of the thing.** Three mutations: fallback
+      disabled → caught; fingerprint ignoring the tile mask → caught; **CPU pass ignoring the tile
+      mask → NOT caught.** That is not a missing test, it is the design telling the truth: containment
+      is enforced at *upload* (only flagged rects are written), so the mask is a **pure optimization** —
+      worth 33% at 25% coverage, 15% at 50%, growing as coverage shrinks, i.e. exactly where the
+      fallback is worth using at all. Since breaking it would be silent, its contract is now pinned
+      where it lives, in `backend/cpu`'s `TestTileMaskConfinesWrites`, which does catch the mutation.
+- [x] **Fingerprint.** Toggling the mark leaves segments/nodes/stops byte-identical, so Phase 7's
+      frame skip would have hashed the two frames alike and skipped the patch the toggle asks for.
+      `FallbackTiles` is now hashed. An unsupported-paint node marked for fallback also keeps its
+      segments in the buffer, unreferenced by any GPU node, purely so the fingerprint covers geometry
+      only the CPU pass can see.
+- [x] **The silent-drop hole is closed for marked nodes.** The encoder dropped an unsupported paint
+      before computing a bbox, which was sound only because the CPU reference drops it too. A marked
+      node now gets its bbox and flags its tiles regardless, so the mark cannot silently do nothing
+      for the very case (Phase 17's image paint) it exists for.
+
+**Result:** corpus gains `fallback-gradient` at `Identical()` and `fallback-gradient-off` at
+`Quantized()`; the pair, not either entry, is the measurement. Edge tiles are covered at 130×100
+(8.125 × 6.25 tiles — both edges partial, by different amounts) where every other test's 128×96 is
+whole tiles. `BenchmarkFallback` sweeps coverage 0/25/50/100% and reports `cpu-tiles` and `%frame`
+alongside ns/op:
+
+| coverage | flagged tiles | GPU-only | with fallback | added |
+|---|---|---|---|---|
+| 0% | 0 | 1.42ms | 1.41ms | none |
+| 25% | 960 | 1.93ms | 7.71ms | +5.8ms |
+| 50% | 1840 | 2.41ms | 12.44ms | +10.0ms |
+| 100% | 3600 | 1.72ms | 23.61ms | +21.9ms |
+
+Linear at ~6µs/tile (1280×720, M4, Metal). Zero flagged tiles costs nothing measurable, so the path
+is free for every scene that does not use it.
 
 **Done when:** a deliberately-inexact feature renders at exact tolerance overall by CPU-filling its
-tiles, with a benchmark showing the fallback tile count and its frame-time cost.
+tiles, with a benchmark showing the fallback tile count and its frame-time cost. ✅ — with the caveat
+that the inexact feature is a *real* one (a radial gradient at the f32-vs-f64 floor) rather than a
+synthetic defect, because Phases 16/17's genuinely-inexact features do not exist yet. When they land,
+they inherit a mechanism already gated, priced, and mutation-tested; what they must not inherit is
+the assumption that it is cheap.
 
 ---
 
@@ -926,7 +991,10 @@ with the fallback decision recorded.
       contract): nearest and bilinear implemented **identically** on both sides — the CPU does the
       same weight math the shader does, rather than leaning on a hardware sampler whose filtering is
       driver-defined. Nearest is exact; bilinear is the first real candidate for perceptual mode +
-      Phase 14 fallback. Repeat/clamp/mirror edge modes pinned identically.
+      Phase 14 fallback — but note 14's price (~6µs/tile): falling back a full-frame image costs more
+      than rendering the whole scene on the CPU, so the escape hatch only answers for a *small* node.
+      A large bilinear image wants pinned kernels or perceptual mode instead.
+      Repeat/clamp/mirror edge modes pinned identically.
 - [ ] Corpus entries: nearest (exact), bilinear (perceptual or fallback), each repeat mode, non-axis
       -aligned transforms.
 
@@ -1015,7 +1083,9 @@ unchanged, with feature logic no longer duplicated across `backend/cpu` and `bac
       attributed to a stage, not the whole frame. Extends Part I's `logTiming`.
 - [ ] **Tile occupancy metrics.** Per-tile segment-count / node-count / clip-count histogram from the
       encoder (the data already exists in `TileSegOff`/`TileNodes`); surfaces load imbalance (the
-      "one dense tile stalls the dispatch" failure mode) and quantifies Phase 14 fallback coverage.
+      "one dense tile stalls the dispatch" failure mode). Fallback coverage is already counted —
+      Phase 14 landed `gpu.Stats{Tiles, FallbackTiles, Dispatches}` — so what is left here is
+      *logging* it per frame alongside the per-stage timings, not measuring it.
 - [ ] **Visual diff overlay tool.** A CLI/debug mode that renders a corpus (or replayed fuzz) scene
       on both backends and writes a heat-map PNG of per-pixel delta (amplified), plus side-by-side
       CPU|GPU|diff. This is the human end of 12c's automatic bisect — when a delta is subtle, *look*
