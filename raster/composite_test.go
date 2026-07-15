@@ -77,21 +77,37 @@ func TestPorterDuffCoverageIsNotSourceAlpha(t *testing.T) {
 	}
 }
 
-// TestPorterDuffFullCoverageIsUnlerped: at cov=1 the lerp must vanish exactly,
-// not merely nearly. Every pixel-aligned scene in the corpus depends on it —
-// those are the entries gated at Δ=0, where a half-LSB of lerp residue would
-// show up as a parity failure rather than as a rounding one.
-func TestPorterDuffFullCoverageIsUnlerped(t *testing.T) {
-	backdrop := [4]uint8{200, 100, 50, 255}
-	src := [4]float64{180, 150, 30, 200}
-	for comp := Clear; comp <= Xor; comp++ {
-		a := blendPx(backdrop, src, 1, Normal, comp)
-		b := blendPx(backdrop, src, 1, Normal, comp)
-		if a != b {
-			t.Fatalf("op %d is not deterministic: %v vs %v", comp, a, b)
-		}
-		if got := blendPx([4]uint8{0, 0, 0, 0}, src, 1, Normal, Src); got != [4]uint8{180, 150, 30, 200} {
-			t.Fatalf("Src at full coverage rounded: got %v", got)
+// TestPorterDuffCoverageIsLinear pins the coverage lerp's shape for every
+// operator: partial coverage must interpolate between the fully-applied operator
+// and the untouched backdrop, and nothing else. The oracle is independent — it
+// reads only the cov=1 result and the backdrop, never the coefficient table — so
+// it holds each operator to its own full-strength answer.
+//
+// It replaces a test named TestPorterDuffFullCoverageIsUnlerped that could not
+// fail: it compared one deterministic call to itself, hardcoded Src while
+// ignoring its loop variable, and used a zero backdrop that annihilates the lerp
+// term regardless. It survived deleting the lerp it was named after. Coverage of
+// cov=1 is now the cov=1 row of this table, and the lerp itself is finally
+// checked at the coverages where it exists.
+func TestPorterDuffCoverageIsLinear(t *testing.T) {
+	backdrops := [][4]uint8{{200, 100, 50, 255}, {60, 30, 15, 128}, {0, 0, 0, 0}}
+	sources := [][4]float64{{180, 150, 30, 200}, {255, 255, 255, 255}, {0, 0, 0, 0}}
+
+	for _, bd := range backdrops {
+		for _, sc := range sources {
+			for comp := SrcOver; comp <= Xor; comp++ {
+				full := blendPx(bd, sc, 1, Normal, comp)
+				for _, cov := range []float64{0.25, 0.5, 0.75} {
+					got := blendPx(bd, sc, cov, Normal, comp)
+					for c := range 4 {
+						want := float64(full[c])*cov + float64(bd[c])*(1-cov)
+						if d := float64(got[c]) - want; d > 1.5 || d < -1.5 {
+							t.Errorf("op %d backdrop=%v src=%v cov=%v chan %d: got %d, want ~%.1f (lerp of full=%d and backdrop=%d)",
+								comp, bd, sc, cov, c, got[c], want, full[c], bd[c])
+						}
+					}
+				}
+			}
 		}
 	}
 }
@@ -197,11 +213,15 @@ func alphaOracle(comp CompositeOp, as, ab float64) float64 {
 // Alpha is also independent of the blend mode by construction — blending moves
 // color, never coverage — so a mode leaking into alpha is a category error, not
 // a rounding one, and this runs each case under three modes to catch it.
+//
+// The loop starts at SrcOver, which is 0. It used to start at Clear (1) while
+// claiming to cover everything, leaving SrcOver — the default every scene in the
+// tree uses — untested here and alphaOracle's SrcOver branch dead.
 func TestPorterDuffAlphaOracle(t *testing.T) {
 	for _, bd := range [][4]uint8{{0, 0, 0, 0}, {200, 100, 50, 255}, {60, 30, 15, 128}} {
 		for _, sc := range [][4]float64{{180, 150, 30, 200}, {0, 0, 0, 0}, {255, 255, 255, 255}} {
 			for _, cov := range []float64{1, 0.5} {
-				for comp := Clear; comp <= Xor; comp++ {
+				for comp := SrcOver; comp <= Xor; comp++ {
 					as, ab := sc[3]/255, float64(bd[3])/255
 					// Coverage picks between the composited alpha and the backdrop's.
 					want := clamp8((alphaOracle(comp, as, ab)*cov + ab*(1-cov)) * 255)

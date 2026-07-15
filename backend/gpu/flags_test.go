@@ -6,45 +6,41 @@ import (
 	"github.com/stohirov/sukho/paint"
 )
 
-// TestPackFlagsRoundTrip checks every blend×composite pair unpacks to what it
-// packed, using the same shifts raster.wgsl's composite() applies. The shader is
-// the real consumer and cannot be unit-tested from Go, so this pins the contract
-// the two sides share; if the WGSL ever moves a shift, the crossed corpus
-// entries (composite-x-blend-*) are what catch it.
+// TestPackFlagsRoundTrip exercises packFlags over its ENTIRE domain — all 16x16
+// values each field can hold, not just the 12x12 the enums declare today —
+// checking that every pair round-trips through the same shifts raster.wgsl's
+// composite() applies, and that no two pairs collide. The shader is the real
+// consumer and cannot be unit-tested from Go, so this pins the Go half of the
+// contract; if the WGSL moves a shift, the crossed corpus entries
+// (composite-x-blend-*) are what catch it.
 //
-// All 144 pairs, because the failure mode is arithmetic: a mask one bit too
-// narrow only shows up for operators whose index sets the bit it drops.
+// The full domain matters because the failure mode is arithmetic: a mask one bit
+// too narrow, or a shift one too short, only misbehaves for the values that set
+// the bit it drops. Testing the declared members alone would leave the 4 unused
+// slots in each field — the ones W3C's non-separable blend modes would fill —
+// unchecked until the day something occupies them.
+//
+// This replaces a test that asserted `paint.Exclusion > 0xF`: a comparison of two
+// compile-time constants (11 > 15), so its body was unreachable and it could not
+// fail. It also read the wrong symbol — a mode appended after Exclusion leaves
+// Exclusion at 11, so the guard would pass while the enum overflowed. Four bits
+// hold 16 values and both enums are complete at 12 (Porter-Duff has exactly 12;
+// blending would reach 16 with W3C's non-separable modes), so the fields have
+// room for the only growth either axis has coming, and a 17th member is the point
+// at which the packing must widen.
 func TestPackFlagsRoundTrip(t *testing.T) {
-	modes := []paint.BlendMode{
-		paint.Normal, paint.Multiply, paint.Screen, paint.Overlay, paint.Darken, paint.Lighten,
-		paint.ColorDodge, paint.ColorBurn, paint.HardLight, paint.SoftLight, paint.Difference, paint.Exclusion,
-	}
-	ops := []paint.CompositeOp{
-		paint.SrcOver, paint.Clear, paint.Src, paint.Dst, paint.DstOver, paint.SrcIn,
-		paint.DstIn, paint.SrcOut, paint.DstOut, paint.SrcAtop, paint.DstAtop, paint.Xor,
-	}
-
-	for _, m := range modes {
-		for _, o := range ops {
-			f := packFlags(m, o)
-			gotMode := paint.BlendMode(f & 0xF)
-			gotOp := paint.CompositeOp((f >> 4) & 0xF)
-			if gotMode != m || gotOp != o {
-				t.Errorf("packFlags(%d, %d) = %#x -> (mode=%d, op=%d)", m, o, f, gotMode, gotOp)
+	seen := map[uint32][2]uint32{}
+	for m := uint32(0); m < 16; m++ {
+		for o := uint32(0); o < 16; o++ {
+			f := packFlags(paint.BlendMode(m), paint.CompositeOp(o))
+			if prev, dup := seen[f]; dup {
+				t.Fatalf("packFlags is not injective: (mode=%d,op=%d) and (mode=%d,op=%d) both pack to %#x",
+					m, o, prev[0], prev[1], f)
+			}
+			seen[f] = [2]uint32{m, o}
+			if gm, gop := f&0xF, (f>>4)&0xF; gm != m || gop != o {
+				t.Errorf("packFlags(%d, %d) = %#x -> (mode=%d, op=%d)", m, o, f, gm, gop)
 			}
 		}
-	}
-}
-
-// The enums must stay inside the four bits each is given. Adding a thirteenth
-// blend mode would silently set the composite axis's low bit instead of failing
-// to compile, so this is the guard for a change made in paint/ that never looks
-// at this file.
-func TestFlagsFitTheirFields(t *testing.T) {
-	if paint.Exclusion > 0xF {
-		t.Errorf("blend modes overflow bits 0-3: highest is %d", paint.Exclusion)
-	}
-	if paint.Xor > 0xF {
-		t.Errorf("composite ops overflow bits 4-7: highest is %d", paint.Xor)
 	}
 }
