@@ -118,6 +118,12 @@ func TestTolIsEarnedFromSceneContent(t *testing.T) {
 		}}
 		return Spec{W: W, H: H, Nodes: []NodeSpec{node(paint.Normal), grad}}
 	}
+	// Two solid nodes, no blending, the second carrying a composite op.
+	compSpec := func(op paint.CompositeOp) Spec {
+		n := node(paint.Normal)
+		n.Composite = op
+		return Spec{W: W, H: H, Nodes: []NodeSpec{node(paint.Normal), n}}
+	}
 
 	for _, tc := range []struct {
 		name string
@@ -125,16 +131,35 @@ func TestTolIsEarnedFromSceneContent(t *testing.T) {
 		want parity.Config
 	}{
 		{"no blending is exact", spec(paint.Normal, paint.Normal), parity.Quantized()},
-		{"one general mode over solids is exact", spec(paint.Normal, paint.Overlay), parity.Quantized()},
-		{"one ill-conditioned mode is still only the floor", spec(paint.Normal, paint.ColorDodge), parity.Quantized()},
-		{"two general modes earn the stacking budget", spec(paint.Overlay, paint.Multiply), stackedBlend},
-		{"three general modes earn the same", spec(paint.Overlay, paint.Multiply, paint.Screen), stackedBlend},
-		// The Phase 15 fuzz find, as a unit case. A gradient anywhere in the scene
-		// leaves a backdrop the two backends already disagree about by an LSB, so
-		// ONE blend node is enough to amplify it past the floor — the case the old
-		// rule called exact and seed 0xb50 disproved.
-		{"one general mode over a gradient earns the budget", gradSpec(paint.Overlay), stackedBlend},
 		{"a gradient with no blending stays at the floor", gradSpec(paint.Normal), parity.Quantized()},
+
+		// The whole rule: dB/dCb decides, and nothing else does. These four modes
+		// are measured at exactly 1.0, so a 1-LSB input difference cannot become a
+		// 2-LSB output one no matter how many of them stack or what they read.
+		{"one non-amplifying mode is exact", spec(paint.Normal, paint.Multiply), parity.Quantized()},
+		{"stacked non-amplifying modes stay exact", spec(paint.Multiply, paint.Screen, paint.Darken), parity.Quantized()},
+		{"non-amplifying over a gradient stays exact", gradSpec(paint.Difference), parity.Quantized()},
+		// HardLight is Overlay's transpose and the one that looks like it should
+		// amplify. Its 2*cs branch only runs when cs<=0.5, so it measures 1.0.
+		{"HardLight is not an amplifier", gradSpec(paint.HardLight), parity.Quantized()},
+
+		// ONE amplifying node is enough, with or without a gradient. Measured: 2 of
+		// 5955 solid-only scenes breach Δ=1, 42 of 904 with a gradient. The gradient
+		// multiplies the risk ~40x; it does not create it. The rule this replaced
+		// gated the solid-only case at Quantized and was wrong.
+		{"one amplifying mode over solids earns the budget", spec(paint.Normal, paint.Overlay), amplifiedBlend},
+		{"one amplifying mode over a gradient earns it too", gradSpec(paint.SoftLight), amplifiedBlend},
+		{"an amplifying mode among non-amplifying ones earns it", spec(paint.Multiply, paint.Overlay, paint.Screen), amplifiedBlend},
+
+		// A non-SrcOver operator earns it on its own: porterDuff unpremultiplies,
+		// and these operators drive the backdrop alpha it divides by toward zero.
+		{"a composite op earns the budget with no blending at all", compSpec(paint.Xor), amplifiedBlend},
+		{"SrcOver composite earns nothing by itself", compSpec(paint.SrcOver), parity.Quantized()},
+
+		// Dodge and burn are unbounded, so no budget fits. They are excluded from
+		// the generator rather than priced; a stored spec holding one keeps the
+		// floor, which is sound only because the corpus feeds them exact inputs.
+		{"one ill-conditioned mode is still only the floor", spec(paint.Normal, paint.ColorDodge), parity.Quantized()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := tc.spec.Tol()
@@ -167,7 +192,32 @@ func TestEarnedGatesNameTheirReason(t *testing.T) {
 // sample size (Δ=3 at 3k seeds, Δ=5 at 25k) while every other mode stays flat at
 // Δ=2. This is a scope decision, and a scope decision that only lives in a
 // comment is one edit from being undone silently.
-// The composite axis's counterpart to the ill-conditioned check below: it holds
+//
+// It also pins that illConditioned and amplifying stay disjoint. Both name modes
+// with dB/dCb>1; the difference is whether the derivative is bounded, and so
+// whether a budget can be fitted at all. A mode in both sets would be claiming
+// both answers.
+func TestGeneratorOmitsIllConditionedModes(t *testing.T) {
+	for op := range illConditioned {
+		for _, m := range blendModes {
+			if m == op {
+				t.Errorf("generator emits %v, whose derivative is unbounded; it cannot be gated by a differential oracle", op)
+			}
+		}
+		if _, both := amplifying[op]; both {
+			t.Errorf("%v is in both amplifying and illConditioned; a mode either has a fittable budget or it does not", op)
+		}
+	}
+	for i := range 2000 {
+		for _, n := range Generate(uint64(i) + 1).Nodes {
+			if _, bad := illConditioned[n.Op]; bad {
+				t.Fatalf("seed=0x%x emitted the ill-conditioned mode %v", i+1, n.Op)
+			}
+		}
+	}
+}
+
+// The composite axis's counterpart to the ill-conditioned check above: it holds
 // gen.go to what it claims to generate, in both directions.
 //
 // randComposite keeps SrcOver 8 times in 10, and that bias is the danger. If it
@@ -212,23 +262,6 @@ func TestGeneratorEmitsEveryCompositeOp(t *testing.T) {
 	frac := float64(seen[paint.SrcOver]) / float64(total)
 	if frac < 0.5 || frac > 0.95 {
 		t.Errorf("SrcOver is %.1f%% of generated nodes; randComposite documents a ~80%% bias", frac*100)
-	}
-}
-
-func TestGeneratorOmitsIllConditionedBlendModes(t *testing.T) {
-	for op := range illConditioned {
-		for _, m := range blendModes {
-			if m == op {
-				t.Errorf("generator emits %v, whose derivative is unbounded; it cannot be gated by a differential oracle", op)
-			}
-		}
-	}
-	for i := range 2000 {
-		for _, n := range Generate(uint64(i) + 1).Nodes {
-			if _, bad := illConditioned[n.Op]; bad {
-				t.Fatalf("seed=0x%x emitted the ill-conditioned mode %v", i+1, n.Op)
-			}
-		}
 	}
 }
 

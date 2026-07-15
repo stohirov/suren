@@ -271,51 +271,73 @@ func (s Spec) Validate() error {
 // scene cannot be gated by a global knob precisely because nobody chose what is
 // in it.
 //
-// The budget is earned by a general (non-Normal) blend node reading a backdrop
-// that ALREADY carries a sub-LSB f32-vs-f64 difference, because such a blend
-// amplifies it past the floor. Two things can leave that difference:
-//
-//   - another general blend node before it (two or more general nodes), or
-//   - a gradient, whose parameter the two backends evaluate at different
-//     precision.
-//
+// The budget is earned by an operation that AMPLIFIES: one whose output moves by
+// more than the 1 LSB its inputs are apart, so the two backends' f32-vs-f64
+// difference clears the rounding decision instead of vanishing under it.
 // Everything else is held to the exact floor. Every gate is exact: nothing here
 // is unreachable enough to need perceptual mode.
 //
-// # The gradient clause is a fuzz find, not a prediction (Phase 15)
+// Two amplifiers exist among what the generator emits, and they are the whole
+// rule:
 //
-// The rule used to count only blend nodes, and "one general mode is exact" was
-// asserted as a fact. It is not: seed 0xb50 shrank to three nodes — an opaque
-// background, a radial-gradient rect, and ONE SoftLight rect — and diverged at
-// Δ=2, one channel of 36864, against this function's Quantized gate. The scene
-// is recorded as corpus regress/fuzz-softlight-over-gradient.json.
+//   - A blend mode with dB/dCb > 1. Measured numerically over the unit square:
+//     Overlay is 2.0 and SoftLight is 4.0; Normal is 0 and Multiply, Screen,
+//     Darken, Lighten, HardLight, Difference and Exclusion are all exactly 1.0.
+//     (HardLight's 2*cs branch only runs when cs <= 0.5, which is why it lands at
+//     1 rather than 2 like its transpose Overlay.)
+//   - Any non-SrcOver Porter-Duff operator. porterDuff unpremultiplies through
+//     s[0]/s[3], and operators like SrcOut and Xor manufacture near-transparent
+//     backdrops, so a 1-LSB difference in a premultiplied channel is divided by a
+//     tiny alpha. SrcOver's fast path never unpremultiplies at all.
 //
-// The mechanism was already written down in stackedBlend's own reason, which
-// names "the 1 LSB that f32-vs-f64 coverage and GRADIENT evaluation leave"; the
-// rule simply never asked whether a gradient was present, only whether a second
-// blend node was. So the old rule contradicted the budget it selected.
+// A gate of exactly 1 LSB is safe for everything else, and that is arithmetic
+// rather than luck: if |dCo/dCb| <= 1 then a 1-LSB input difference gives at most
+// a 1-LSB output difference, and floor(x+.5) of two reals within 1 of each other
+// cannot differ by 2.
 //
-// It is a pre-existing hole rather than a Phase 15 regression, and that was
-// verified rather than assumed: the minimized scene contains no Porter-Duff
-// operator at all, and replaying it against the tree as of the previous commit
-// reproduces Δ=2 at the same pixel. Phase 15 found it only because adding a
-// composite draw to the generator reshuffled every seed's scene — which is worth
-// remembering about this whole apparatus: the seeds are not a fixed test set,
-// and a generator change re-rolls the dice on all of them.
+// # This rule is measured, and its two predecessors were not (Phase 15 review)
+//
+// Both earlier rules asserted exactness for cases that are not exact, and both
+// were wrong in the same way: they keyed on a correlate instead of the mechanism.
+//
+//   - `general >= 2` (through Phase 14) called one blend node exact. Seed 0xb50
+//     disproved it — an opaque background, a radial-gradient rect, and ONE
+//     SoftLight rect diverging at Δ=2. Recorded as
+//     regress/fuzz-softlight-over-gradient.json.
+//   - `general >= 2 || (general >= 1 && gradient)` (Phase 15's fix) blamed the
+//     gradient. The gradient is a risk MULTIPLIER, not the cause: one Overlay
+//     node over solids only, which that rule gated at Quantized, still breaches
+//     at Δ=2 in 2 of 5955 generated scenes. With a gradient the same node breaches
+//     in 42 of 904 — 40x more often, which is exactly why a gradient was present
+//     in the find that prompted the rule and why blaming it looked right.
+//
+// The complement is measured at the sample size that matters: non-amplifying
+// blends stacked over the generator's own scenes with all-SrcOver composites hold
+// at Δ<=1 over 3000 scenes, 0 breaches — checked at a size that had already caught
+// a 3-in-2999 event, so "never" here is not a claim a small sample was too coarse
+// to refute.
 func (s Spec) Tol() parity.Config {
-	general, gradient := 0, false
 	for _, n := range s.Nodes {
-		if n.Op != paint.Normal {
-			general++
+		if _, amp := amplifying[n.Op]; amp || n.Composite != paint.SrcOver {
+			return amplifiedBlend
 		}
-		if n.Paint.Kind != PaintSolid {
-			gradient = true
-		}
-	}
-	if general >= 2 || (general >= 1 && gradient) {
-		return stackedBlend
 	}
 	return parity.Quantized()
+}
+
+// amplifying names the blend modes whose backdrop derivative exceeds 1 while
+// staying bounded, so a budget can be fitted to them.
+//
+// ColorDodge and ColorBurn amplify too and are deliberately NOT here: their
+// derivatives are unbounded, so no budget fits (see illConditioned). They are
+// excluded from the generator instead, and a stored spec containing one keeps the
+// ordinary floor — which is sound only because the corpus feeds them
+// bit-identical inputs. A generated dodge scene would need this set to grow a
+// third case with no number to put in it, which is the reason gen.go refuses to
+// emit them.
+var amplifying = map[paint.BlendMode]struct{}{
+	paint.Overlay:   {},
+	paint.SoftLight: {},
 }
 
 // illConditioned names the modes whose blend derivative is unbounded — 1/(1-cs)
@@ -338,7 +360,7 @@ var illConditioned = map[paint.BlendMode]bool{
 	paint.ColorBurn:  true,
 }
 
-// stackedBlend is the one tolerance this package adds to the tree, and it is
+// amplifiedBlend is the one tolerance this package adds to the tree, and it is
 // worth exactly one bit above the floor.
 //
 // Both backends composite into an 8-bit buffer per node — the CPU because
@@ -365,11 +387,11 @@ var illConditioned = map[paint.BlendMode]bool{
 // removes that. Retiring this budget needs the two backends to compute in the
 // same precision — which Phase 11 rejected on purpose, since matching the other
 // backend's rounding rather than the true value is the worse trade.
-// Phase 15 widened WHEN this is earned without changing what it says: a blend
-// node reading a gradient hits the same mechanism as one reading another blend
-// node, and the reason below already said so. See Tol.
-var stackedBlend = parity.Budget(2,
-	"a blend node with dB/dCb>1 reads a backdrop that is already 1 LSB apart — left there by a previous blend node, or by f32-vs-f64 evaluation of a gradient — and amplifies it; measured flat at Δ≤2 for 2-4 stacked nodes over 25000 seeds")
+// Renamed from amplifiedBlend in the Phase 15 review: stacking was never the
+// cause, and the name kept the rule pointed at the wrong variable. One node is
+// enough if it amplifies. See Tol.
+var amplifiedBlend = parity.Budget(2,
+	"an amplifying operation clears the rounding decision that its 1-LSB f32-vs-f64 input difference would otherwise vanish under: a blend mode with dB/dCb>1 (Overlay 2.0, SoftLight 4.0) or a non-SrcOver Porter-Duff operator, whose unpremultiply divides a premultiplied LSB by a backdrop alpha the operator itself can drive toward zero; Δ≤2 held flat over 531622 differential executions")
 
 // clone copies the node slice so a caller may replace fields of one node without
 // mutating the original. Fields holding slices (Pts, Stops, Dashes, Clips) are
