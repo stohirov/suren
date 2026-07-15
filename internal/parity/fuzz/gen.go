@@ -21,18 +21,22 @@ const (
 // unbounded as the divisor approaches zero, so they multiply ANY difference in
 // their inputs without bound. A differential oracle needs a well-conditioned
 // function — otherwise it measures the conditioning of the operator, not the
-// agreement of the renderers. Measured on the scene the fuzzer produced (seed
-// 0x737): a ColorDodge node reading a backdrop that a previous blend left
-// differing by the legal 1 LSB diverged by Δ=18, and the same node fed a
-// gradient — whose parameter differs by well under one LSB, invisible at Δ≤1
-// under SrcOver — diverged by Δ=17 via dB/dcs = cb/(1-cs)² ≈ 54. Both backends
-// are individually correct in both cases; there is no bug to find and no bound
-// to gate at.
+// agreement of the renderers, and both backends can be individually correct
+// while disagreeing by any amount.
+//
+// The exclusion survived Phase 13, which shrank the effect without bounding it.
+// Pinning the shader's rounding removed the 1-LSB backdrop mismatch these modes
+// were amplifying, and the worst generated divergence fell from Δ=18 to Δ=5 —
+// but what is left is the *sub*-LSB difference in antialiased coverage and
+// gradient parameters, and an unbounded derivative amplifies that too. The
+// measurement says so directly: the worst delta over scenes containing dodge or
+// burn keeps climbing with sample size (Δ=3 at 3k seeds, Δ=5 at 25k) while every
+// other mode stays flat at Δ=2 across both. A budget fitted to any sample of an
+// unbounded distribution is a flake waiting for a longer fuzz run.
 //
 // They stay covered where the oracle DOES apply: the corpus feeds them
-// bit-identical inputs (a solid source over a plain backdrop) and gates them
-// exactly, at the Δ≤2/Δ≤3 budgets Phase 10 measured — which this generator
-// independently re-derived for the single-node case before the exclusion.
+// bit-identical inputs (a solid source over a plain backdrop) and — since
+// Phase 13 — gates them at the ordinary quantization floor, no budget needed.
 // Spec.Tol still gates them correctly if a stored spec contains one, because Tol
 // is a function of the scene, not of this generator.
 var blendModes = []paint.BlendMode{

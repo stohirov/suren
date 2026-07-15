@@ -125,6 +125,16 @@ fn blendCh(mode: u32, cb: f32, cs: f32) -> f32 {
   }
 }
 
+// quant8 pins the 8-bit quantization to the CPU reference's rule: clamp8 in
+// raster/fill.go is uint8(v + 0.5), round-half-up. Leaving the rounding to the
+// driver's f32->u8 conversion on the rgba8unorm store would make it
+// implementation-defined, and an implementation-defined rounding rule cannot be
+// half of a parity contract — Vulkan and DX12 need not round like Metal.
+fn quant8(v: vec4<f32>) -> vec4<f32> {
+  let c = clamp(v, vec4<f32>(0.0), vec4<f32>(1.0));
+  return floor(c * 255.0 + 0.5) * (1.0 / 255.0);
+}
+
 fn composite(mode: u32, dst: vec4<f32>, src: vec4<f32>, alpha: f32) -> vec4<f32> {
   let fa = src.w * alpha;
   if (mode == 0u) {
@@ -287,7 +297,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         if (nd.kind != 0u) {
           src = gradColor(nd, f32(gx) + 0.5, f32(y) + 0.5);
         }
-        fbl[lx] = composite(nd.flags, fbl[lx], src, alpha);
+        // Quantize per node, not once at the end. The CPU reference composites
+        // into an 8-bit image.RGBA, so every node there reads a backdrop the
+        // previous node rounded to 8 bits. Accumulating the tile in f32 across
+        // all nodes and rounding once is a DIFFERENT computation, not a more
+        // precise version of the same one, and the difference grows without
+        // bound with stack depth: measured Δ=10 at 64 stacked Overlay layers
+        // versus Δ=0 with this rounding in place (corpus: blend-stack-*).
+        fbl[lx] = quant8(composite(nd.flags, fbl[lx], src, alpha));
       }
     }
   }

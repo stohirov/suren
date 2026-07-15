@@ -269,64 +269,71 @@ func (s Spec) Validate() error {
 // scene cannot be gated by a global knob precisely because nobody chose what is
 // in it.
 //
-// One general (non-SrcOver) blend node is held to the exact floor, or to that
-// mode's named budget. Two or more additionally earn the stacking budget. The
-// gate is always the worst that applies, and always exact: nothing here is
-// unreachable enough to need perceptual mode.
+// One general (non-SrcOver) blend node is held to the exact floor. Two or more
+// earn the stacking budget. Every gate is exact: nothing here is unreachable
+// enough to need perceptual mode.
 func (s Spec) Tol() parity.Config {
 	general := 0
-	worst := parity.Quantized()
 	for _, n := range s.Nodes {
-		if n.Op == paint.SrcOver {
-			continue
-		}
-		general++
-		if c, ok := divergentBlend[n.Op]; ok && c.Tol > worst.Tol {
-			worst = c
+		if n.Op != paint.SrcOver {
+			general++
 		}
 	}
-	if general >= 2 && stackedBlend.Tol > worst.Tol {
+	if general >= 2 {
 		return stackedBlend
 	}
-	return worst
+	return parity.Quantized()
 }
 
-// These mirror internal/corpus's blend budgets: the same operation diverges for
-// the same reason, so it earns the same tolerance whether the scene was written
-// by hand or generated. Measured over 700 generated seeds, a scene whose only
-// general mode is ColorDodge reaches exactly Δ=2 and every other single mode
-// holds Δ≤1 — the corpus budgets, independently re-derived.
-var divergentBlend = map[paint.BlendMode]parity.Config{
-	paint.ColorDodge: parity.Budget(2, "cb/(1-cs) division diverges at the min(1,·) clamp in f32 vs f64"),
-	paint.ColorBurn:  parity.Budget(3, "(1-cb)/cs division diverges at the min(1,·) clamp in f32 vs f64"),
+// illConditioned names the modes whose blend derivative is unbounded — 1/(1-cs)
+// for ColorDodge, 1/cs for ColorBurn — so they amplify any difference in their
+// inputs without bound.
+//
+// It is a SET, not a map of budgets. These modes once carried Budget(2)/Budget(3)
+// here and in the corpus; Phase 13 retired those by pinning the rounding, and
+// re-deriving a budget for them would be worse than no budget at all: an
+// unbounded distribution has no worst case to measure, so any number fitted to a
+// sample is a flake waiting for a longer run (Δ=3 at 3k generated seeds, Δ=5 at
+// 25k, still climbing). The set's job is to keep gen.go honest — see
+// TestGeneratorOmitsIllConditionedBlendModes — not to price a divergence.
+//
+// A stored spec containing one is therefore gated at the ordinary floor, which is
+// where the corpus now holds them when their inputs are pinned. If such a spec
+// ever fails, that is a signal to look, not a knob to turn.
+var illConditioned = map[paint.BlendMode]bool{
+	paint.ColorDodge: true,
+	paint.ColorBurn:  true,
 }
 
 // stackedBlend is the one tolerance this package adds to the tree, and it is
 // worth exactly one bit above the floor.
 //
-// Both backends composite through an 8-bit intermediate, so a second blend node
-// reads a backdrop that has ALREADY been quantized and may already differ by the
-// legal 1 LSB. A blend's sensitivity to its backdrop is
-// d(Co)/d(Cb) = αs·B'(cb) + (1-αs) — the backdrop alpha cancels — so a mode
-// whose blend derivative exceeds 1 (Overlay at 2(1-cs)) multiplies that 1 LSB
-// rather than absorbing it, instead of the single-node case where both backends
-// read identical inputs and only their final rounding can differ.
+// Both backends composite into an 8-bit buffer per node — the CPU because
+// image.RGBA is its framebuffer, the GPU because Phase 13 made raster.wgsl round
+// per node to match. So a second blend node reads a backdrop already quantized,
+// which the two may have rounded to values 1 LSB apart wherever antialiased
+// coverage or a gradient parameter differs sub-LSB between f64 and f32. A blend's
+// sensitivity to its backdrop is d(Co)/d(Cb) = αs·B'(cb) + (1-αs) — the backdrop
+// alpha cancels — so a mode with B' > 1 (Overlay at 2(1-cs)) multiplies that
+// 1 LSB instead of absorbing it.
 //
 // The amplification is real but mild and does not compound with depth, which is
-// the measurement that made this a Budget rather than a retreat to perceptual
-// mode. Over 3000 generated seeds: Δ≤1 at zero or one general node, and Δ≤2 at
-// two, three AND four — flat, because the bounded-gain modes have B' ≤ 2 and the
-// αs in the gain formula keeps the per-node factor near 1. Alpha never diverged
-// at any depth (Δ=0), as it cannot: αo = αs + αb(1-αs) has gain (1-αs) ≤ 1.
+// what made this a Budget rather than a retreat to perceptual mode. Measured over
+// 3000 generated seeds: Δ≤1 at zero or one general node, Δ≤2 at two, three AND
+// four — flat, because the bounded-gain modes have B' ≤ 2 and the αs in the gain
+// formula keeps the per-node factor near 1. Still flat at Δ≤2 over 25000 seeds.
+// Alpha never diverged at any depth, as it cannot: αo = αs + αb(1-αs) has gain
+// (1-αs) ≤ 1.
 //
-// This is not a renderer defect — each backend is individually correct, and the
-// divergence is the quantization floor of the shared intermediate, seen twice.
-// Phase 13 is the fix rather than a wider tolerance: if pinning the rounding
-// rules drives the per-composite delta to 0, there is nothing left to amplify
-// and these scenes should collapse back to the floor. That is a testable
-// prediction, and this budget is where it will be observed.
+// Phase 13 tried and failed to retire this one. Pinning the rounding DID retire
+// the dodge/burn budgets and did remove an unbounded-with-depth divergence
+// (Δ=10 at 64 stacked layers → Δ=0), but the residue here is seeded by f32-vs-f64
+// evaluation of coverage and gradients, not by rounding, and no rounding rule
+// removes that. Retiring this budget needs the two backends to compute in the
+// same precision — which Phase 11 rejected on purpose, since matching the other
+// backend's rounding rather than the true value is the worse trade.
 var stackedBlend = parity.Budget(2,
-	"a second blend node reads an already-quantized backdrop and a blend with dB/dCb>1 amplifies its 1-LSB rounding; measured flat at Δ≤2 for 2-4 stacked nodes over 3000 seeds")
+	"a second blend node reads an already-quantized backdrop and a blend with dB/dCb>1 amplifies the 1 LSB that f32-vs-f64 coverage and gradient evaluation leave there; measured flat at Δ≤2 for 2-4 stacked nodes over 25000 seeds")
 
 // clone copies the node slice so a caller may replace fields of one node without
 // mutating the original. Fields holding slices (Pts, Stops, Dashes, Clips) are

@@ -1,7 +1,6 @@
 package corpus
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/stohirov/sukho/paint"
@@ -36,13 +35,23 @@ func TestEntriesAreWellFormed(t *testing.T) {
 	}
 }
 
-// Each blend entry must build its own mode. Capturing the loop variable wrongly
-// would silently collapse all twelve into one scene, and every gate would still
-// pass while testing a single mode twelve times.
+// Each per-mode blend entry must build its own mode. Capturing the loop variable
+// wrongly would silently collapse all twelve into one scene, and every gate would
+// still pass while testing a single mode twelve times.
+//
+// The entries are matched by exact name rather than by a "blend-" prefix: a
+// prefix would sweep in any future entry that merely starts the same way (it
+// already caught blend-stack-*), and a guard that fails on unrelated entries
+// gets loosened rather than heeded.
 func TestBlendEntriesBuildDistinctScenes(t *testing.T) {
+	want := map[string]bool{}
+	for _, b := range blendModes {
+		want["blend-"+b.name] = true
+	}
+
 	ops := map[paint.BlendMode]string{}
 	for _, e := range All() {
-		if !strings.HasPrefix(e.Name, "blend-") {
+		if !want[e.Name] {
 			continue
 		}
 		sc := e.Build()

@@ -117,10 +117,9 @@ func TestTolIsEarnedFromSceneContent(t *testing.T) {
 	}{
 		{"no blending is exact", spec(paint.SrcOver, paint.SrcOver), parity.Quantized()},
 		{"one general mode is exact", spec(paint.SrcOver, paint.Overlay), parity.Quantized()},
-		{"one ColorDodge earns its budget", spec(paint.SrcOver, paint.ColorDodge), divergentBlend[paint.ColorDodge]},
+		{"one ill-conditioned mode is still only the floor", spec(paint.SrcOver, paint.ColorDodge), parity.Quantized()},
 		{"two general modes earn the stacking budget", spec(paint.Overlay, paint.Multiply), stackedBlend},
 		{"three general modes earn the same", spec(paint.Overlay, paint.Multiply, paint.Screen), stackedBlend},
-		{"a worse single budget outranks stacking", spec(paint.ColorBurn, paint.Screen), divergentBlend[paint.ColorBurn]},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := tc.spec.Tol()
@@ -147,13 +146,14 @@ func TestEarnedGatesNameTheirReason(t *testing.T) {
 }
 
 // The generator must not emit the ill-conditioned modes. Their unbounded blend
-// derivative amplifies sub-LSB input differences without bound (measured Δ=18
-// with both backends correct), so a generated scene containing one measures the
-// operator's conditioning rather than the renderers' agreement. This is a scope
-// decision, and a scope decision that only lives in a comment is one edit from
-// being undone silently.
+// derivative amplifies sub-LSB input differences without bound, so a generated
+// scene containing one measures the operator's conditioning rather than the
+// renderers' agreement: the worst delta over such scenes keeps climbing with
+// sample size (Δ=3 at 3k seeds, Δ=5 at 25k) while every other mode stays flat at
+// Δ=2. This is a scope decision, and a scope decision that only lives in a
+// comment is one edit from being undone silently.
 func TestGeneratorOmitsIllConditionedBlendModes(t *testing.T) {
-	for op := range divergentBlend {
+	for op := range illConditioned {
 		for _, m := range blendModes {
 			if m == op {
 				t.Errorf("generator emits %v, whose derivative is unbounded; it cannot be gated by a differential oracle", op)
@@ -162,7 +162,7 @@ func TestGeneratorOmitsIllConditionedBlendModes(t *testing.T) {
 	}
 	for i := range 2000 {
 		for _, n := range Generate(uint64(i) + 1).Nodes {
-			if _, bad := divergentBlend[n.Op]; bad {
+			if _, bad := illConditioned[n.Op]; bad {
 				t.Fatalf("seed=0x%x emitted the ill-conditioned mode %v", i+1, n.Op)
 			}
 		}

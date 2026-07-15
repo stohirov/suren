@@ -36,8 +36,14 @@ var blendModes = []struct {
 	{"overlay", paint.Overlay, parity.Quantized()},
 	{"darken", paint.Darken, parity.Quantized()},
 	{"lighten", paint.Lighten, parity.Quantized()},
-	{"color-dodge", paint.ColorDodge, parity.Budget(2, "cb/(1-cs) division diverges at the min(1,·) clamp in f32 vs f64")},
-	{"color-burn", paint.ColorBurn, parity.Budget(3, "(1-cb)/cs division diverges at the min(1,·) clamp in f32 vs f64")},
+	// These two carried Budget(2) and Budget(3) from Phase 10 until Phase 13
+	// pinned the shader's rounding. The budgets named the division as the culprit,
+	// which was wrong: the division only AMPLIFIED a backdrop that the two
+	// backends had quantized differently. With the GPU rounding per node the way
+	// the CPU reference does, both now hold the ordinary floor — retired by a fix
+	// rather than widened.
+	{"color-dodge", paint.ColorDodge, parity.Quantized()},
+	{"color-burn", paint.ColorBurn, parity.Quantized()},
 	{"hard-light", paint.HardLight, parity.Quantized()},
 	{"soft-light", paint.SoftLight, parity.Quantized()},
 	{"difference", paint.Difference, parity.Quantized()},
@@ -53,6 +59,13 @@ func All() []Entry {
 		{"clip-rect", 96, 96, sample.ClipRectScene, parity.Identical()},
 		{"clip-path", sample.W, sample.H, func() *scene.Scene { return sample.ClipPathScene(false) }, parity.Quantized()},
 		{"clip-path-nested", sample.W, sample.H, func() *scene.Scene { return sample.ClipPathScene(true) }, parity.Quantized()},
+		// Δ=0, not the floor: pixel-aligned solid quads leave no coverage or
+		// gradient to round differently, so the only thing these can measure is
+		// whether both backends quantize each node the same way. They gate
+		// Phase 13's per-node rounding, and 64 deep is where a regression shows as
+		// Δ=10 rather than as the single LSB visible at typical depths.
+		{"blend-stack-srcover", 96, 96, func() *scene.Scene { return sample.BlendStack(64, paint.SrcOver) }, parity.Identical()},
+		{"blend-stack-overlay", 96, 96, func() *scene.Scene { return sample.BlendStack(64, paint.Overlay) }, parity.Identical()},
 	}
 	for _, b := range blendModes {
 		entries = append(entries, Entry{

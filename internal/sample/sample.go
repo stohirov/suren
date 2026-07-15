@@ -148,6 +148,33 @@ func BlendScene(op paint.BlendMode) *scene.Scene {
 	return s
 }
 
+// BlendStack layers n translucent quads with the same blend op.
+//
+// It exists to hold Phase 13's per-node rounding in place. The CPU reference
+// composites into an 8-bit image.RGBA, so it re-quantizes after every node; a GPU
+// that instead accumulated its tile in f32 and rounded once at the end would be
+// computing a different function, and the gap grows with depth — measured Δ=10 at
+// 64 Overlay layers before raster.wgsl rounded per node, Δ=0 after.
+//
+// The geometry is deliberately pixel-aligned and the paint solid, so coverage is
+// exactly 0 or 1 and no antialiasing or gradient can seed a sub-LSB difference.
+// That is what lets this scene be gated at Δ=0 and makes it a clean probe of the
+// rounding alone: any delta here is a rounding divergence, not a coverage one.
+// Depth is the whole point — at four layers the effect is a single LSB and the
+// generated scenes in internal/parity/fuzz cannot see it.
+func BlendStack(n int, op paint.BlendMode) *scene.Scene {
+	c := render.NewCanvas()
+	c.FillColor(path.Rect(geom.RectXYWH(0, 0, 96, 96)), paint.FromRGBA8(40, 90, 160, 255))
+	for i := range n {
+		c.SetBlend(op)
+		x := float64(4 + i%8)
+		y := float64(4 + i%5)
+		col := paint.FromRGBA8(uint8(30+7*i%200), uint8(200-5*i%180), uint8(60+11*i%190), 90)
+		c.FillColor(path.Rect(geom.RectXYWH(x, y, 80, 80)), col)
+	}
+	return c.Scene()
+}
+
 func appendPath(dst *path.Path, src path.Path) {
 	it := src.Iter()
 	for {
