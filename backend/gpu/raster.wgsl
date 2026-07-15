@@ -75,6 +75,16 @@ fn gradColor(nd: Node, px: f32, py: f32) -> vec4<f32> {
   }
   let c = interpStops(nd.stopStart, nd.stopCount, t);
   let ca = clamp(c.w, 0.0, 1.0);
+  // Deliberately NOT rounded to 16 bits, though the CPU's gradient is: cpu's
+  // gradShader goes through paint.Color.RGBA(), which returns 16-bit
+  // premultiplied, then divides by 257 — so the reference never sees a
+  // continuous gradient colour. Mirroring that here was measured and reverted.
+  // It moved nothing (gradient stayed Δ=1, and a gradient read through
+  // ColorDodge's unbounded derivative stayed Δ=0), because 16-bit error sits
+  // ~130x below the 8-bit rounding decision. It is also an artifact of reusing
+  // Go's color.Color convention rather than a choice the reference made, and
+  // matching an artifact costs per-pixel work to enshrine an accident. Recorded
+  // as a known semantic difference that lives below the floor.
   return vec4<f32>(clamp(c.x, 0.0, 1.0) * ca, clamp(c.y, 0.0, 1.0) * ca, clamp(c.z, 0.0, 1.0) * ca, ca);
 }
 
@@ -158,6 +168,15 @@ fn composite(mode: u32, dst: vec4<f32>, src: vec4<f32>, alpha: f32) -> vec4<f32>
   return vec4<f32>(co, ao);
 }
 
+// The backdrop is a SUMMATION-ORDER divergence from the CPU reference, and a
+// deliberate one. raster.go's Sweep accumulates one running total left-to-right
+// across the whole row; here every contribution left of the tile collapses into
+// this scalar in SEGMENT order, and the tile's sweep seeds its accumulator with
+// it. The two are equal in exact arithmetic and not in f32/f64: addition is not
+// associative. Fixing it would mean sweeping whole rows, which is precisely the
+// serialization the 2D-tiling rewrite removed (720 -> ~57,600 threads), so this
+// is one of the contributors to the Δ≤1 floor that the contract accepts rather
+// than an oversight. Any reduction whose order is load-bearing belongs here.
 fn routeCol(col: i32, dcov: f32, dar: f32, X0: i32,
             cov: ptr<function, array<f32, 16>>,
             ar: ptr<function, array<f32, 16>>,
