@@ -514,15 +514,61 @@ cross-backend parity gate, so both correctly stay outside the contract.
 Four capabilities on one shared corpus + generator. Order is cheapest-first; each is independently
 useful.
 
-#### 12a — golden image corpus with exact + perceptual modes
+#### 12a — golden image corpus with exact + perceptual modes  ✅
 
-- [ ] Promote `internal/sample` scenes into a **named corpus** (`internal/corpus`) — each entry
+- [x] Promote `internal/sample` scenes into a **named corpus** (`internal/corpus`) — each entry
       `{name, build func() *scene.Scene, tol parity.Config}`. The existing `TestParity*` scenes
-      seed it; feature phases in Section C each add entries.
-- [ ] Extend `internal/goldentest` beyond byte-exact PNG: add `AssertExact` (premultiplied RGBA
+      seed it; feature phases in Section C each add entries. **19 entries**: solid, gradient,
+      many-nodes, many-segments, clip-rect, clip-path, clip-path-nested, blend-× 12. The seven
+      hand-written `TestParity*` functions collapsed into one `TestParityCorpus` loop; the rect-clip
+      scene moved out of the gpu test file into `sample.ClipRectScene` so both backends share it.
+- [x] Extend `internal/goldentest` beyond byte-exact PNG: add `AssertExact` (premultiplied RGBA
       delta, the current gate) and `AssertPerceptual` (ΔE + SSIM with per-entry thresholds). Golden
       images stored per corpus entry; `-update` regenerates. The GPU parity tests become
       "render corpus entry on both backends, assert per its `tol`."
+- [x] **Perceptual mode implemented** (Phase 11 declared it and made `Compare` refuse it).
+      `Perceptual(maxDeltaE, minSSIM, why)`; `Validate` demands the `why` exactly as `Budget` does.
+
+**Two measured design decisions:**
+
+**1. Goldens store premultiplied bytes through an NRGBA container, not a plain PNG.** Measured the
+obvious approach first: encoding an `*image.RGBA` to PNG unpremultiplies, decoding re-premultiplies,
+and the round-trip **loses Δ=1 on 13% of channels** (34056/262144; worst `[1 1 1 2]` → `[0 0 0 2]`).
+That is the *entire* `Quantized` budget spent on the file format before the renderer is compared —
+the gate would measure PNG. Carrying premultiplied bytes through an `image.NRGBA` container is
+**bit-exact** (the encoder copies NRGBA verbatim) and still compresses (256×256 → 1.6 KB); opaque
+frames encode as RGB and decode as `*image.RGBA`, equally exact since premul == straight at α=255.
+`TestGoldenRoundTripIsLosslessForPremultiplied` guards it over all (value, alpha) pairs. Cost: a
+translucent golden displays composited-over-black in a viewer — which is what the renderer produced.
+
+**2. The golden gate is `Identical()`, not the entry's `Tol`.** They answer different questions:
+`Tol` is the **cross-backend** gate (CPU vs GPU, where two float pipelines diverge), while a golden
+is generated *by* the deterministic CPU reference, so re-rendering must reproduce it bit-for-bit.
+Gating goldens at `Tol` would let the CPU drift by a full LSB undetected. The CPU golden test also
+needs no GPU, so it catches drift in plain CI. (Cross-platform CPU determinism — Go may fuse FMA on
+some architectures — is Phase 13/12d's problem, and the repo already relied on it.)
+
+**Perceptual gate, and why it is three checks rather than ΔE alone:** ΔE is measured over the frame
+composited against **opaque black** — the premultiplied RGB *is* that composite, making it a total
+function with no unpremultiply division and no undefined color at α=0. But compositing over black
+makes transparent-black and opaque-black indistinguishable to ΔE, so **alpha is gated separately**
+by `Tol`; and **SSIM** (luma, 11×11 Gaussian σ=1.5, Wang et al.) catches structural drift a
+per-pixel metric averages away. All three are asserted by test, including the alpha blind spot.
+ΔE is **CIE76, not CIEDE2000**, recorded with its reason: CIE76 overestimates distance for saturated
+colors, which is a defect when *ranking* arbitrary pairs but not when gating two renders that should
+already be near-identical — there it is only ever *stricter* than CIEDE2000, and a stricter gate
+cannot admit a divergence CIEDE2000 would have caught. Upgrade if a feature ever needs finer
+discrimination. `srgb8ToLab` is validated against **published Lindbloom sRGB→Lab D65 references**
+(red 53.2408/80.0925/67.2032, green, blue, mid-grey, and the exact white=100 / black=0 endpoints) —
+an independent oracle, not values read back out of the implementation.
+
+**Result:** `go test ./...` runs 19 corpus entries on the GPU at their earned gates (all pass) and
+19 CPU goldens at Δ=0 (316 KB total). `AssertPNG` retired — its failure affordance (writing the
+actual + red-highlighted diff image to a temp dir) folded into `assertGolden`, so it survives and
+seeds Phase 22's overlay. `TestBlendEntriesBuildDistinctScenes` guards the corpus against a
+loop-variable capture bug that would silently collapse all 12 blend entries into one scene while
+every gate still passed; **verified it fails when the bug is deliberately injected**, since a guard
+that cannot fail is worse than none.
 
 #### 12b — property-based invariants
 
