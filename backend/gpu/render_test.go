@@ -6,6 +6,7 @@ import (
 
 	"github.com/stohirov/sukho/backend/cpu"
 	"github.com/stohirov/sukho/geom"
+	"github.com/stohirov/sukho/internal/parity"
 	"github.com/stohirov/sukho/internal/sample"
 	"github.com/stohirov/sukho/paint"
 	"github.com/stohirov/sukho/path"
@@ -23,11 +24,7 @@ func TestDeviceInit(t *testing.T) {
 	t.Logf("adapter backend=%v type=%v", info.BackendType, info.AdapterType)
 }
 
-func parity(t *testing.T, want *image.RGBA, sc *scene.Scene) {
-	parityTol(t, want, sc, 2)
-}
-
-func parityTol(t *testing.T, want *image.RGBA, sc *scene.Scene, tol int) {
+func gpuParity(t *testing.T, want *image.RGBA, sc *scene.Scene, cfg parity.Config) {
 	t.Helper()
 	r, err := NewRenderer(want.Rect.Dx(), want.Rect.Dy())
 	if err != nil {
@@ -42,61 +39,44 @@ func parityTol(t *testing.T, want *image.RGBA, sc *scene.Scene, tol int) {
 	if err != nil {
 		t.Fatalf("readback: %v", err)
 	}
-
-	maxd, over := 0, 0
-	for i := range want.Pix {
-		d := int(got.Pix[i]) - int(want.Pix[i])
-		if d < 0 {
-			d = -d
-		}
-		if d > maxd {
-			maxd = d
-		}
-		if d > tol {
-			over++
-		}
-	}
-	t.Logf("max channel delta=%d, channels off-by->%d: %d/%d", maxd, tol, over, len(want.Pix))
-	if maxd > tol {
-		t.Fatalf("gpu/cpu mismatch: max channel delta=%d (want <=%d)", maxd, tol)
-	}
+	parity.Assert(t, got, want, cfg)
 }
 
 func TestParitySolid(t *testing.T) {
-	parity(t, cpu.Render(sample.Scene(), sample.W, sample.H), sample.Scene())
+	gpuParity(t, cpu.Render(sample.Scene(), sample.W, sample.H), sample.Scene(), parity.Quantized())
 }
 
 func TestParityManyNodes(t *testing.T) {
 	const w, h = 640, 360
-	parity(t, cpu.Render(sample.ManyNodes(w, h, 40, 24), w, h), sample.ManyNodes(w, h, 40, 24))
+	gpuParity(t, cpu.Render(sample.ManyNodes(w, h, 40, 24), w, h), sample.ManyNodes(w, h, 40, 24), parity.Identical())
 }
 
 func TestParityGradient(t *testing.T) {
-	parity(t, cpu.Render(sample.GradientScene(), sample.W, sample.H), sample.GradientScene())
+	gpuParity(t, cpu.Render(sample.GradientScene(), sample.W, sample.H), sample.GradientScene(), parity.Quantized())
 }
 
 func TestParityBlendModes(t *testing.T) {
 	modes := []struct {
 		name string
 		op   paint.BlendMode
-		tol  int
+		cfg  parity.Config
 	}{
-		{"SrcOver", paint.SrcOver, 2},
-		{"Multiply", paint.Multiply, 2},
-		{"Screen", paint.Screen, 2},
-		{"Overlay", paint.Overlay, 2},
-		{"Darken", paint.Darken, 2},
-		{"Lighten", paint.Lighten, 2},
-		{"ColorDodge", paint.ColorDodge, 3},
-		{"ColorBurn", paint.ColorBurn, 3},
-		{"HardLight", paint.HardLight, 2},
-		{"SoftLight", paint.SoftLight, 2},
-		{"Difference", paint.Difference, 2},
-		{"Exclusion", paint.Exclusion, 2},
+		{"SrcOver", paint.SrcOver, parity.Quantized()},
+		{"Multiply", paint.Multiply, parity.Quantized()},
+		{"Screen", paint.Screen, parity.Quantized()},
+		{"Overlay", paint.Overlay, parity.Quantized()},
+		{"Darken", paint.Darken, parity.Quantized()},
+		{"Lighten", paint.Lighten, parity.Quantized()},
+		{"ColorDodge", paint.ColorDodge, parity.Budget(2, "cb/(1-cs) division diverges at the min(1,·) clamp in f32 vs f64")},
+		{"ColorBurn", paint.ColorBurn, parity.Budget(3, "(1-cb)/cs division diverges at the min(1,·) clamp in f32 vs f64")},
+		{"HardLight", paint.HardLight, parity.Quantized()},
+		{"SoftLight", paint.SoftLight, parity.Quantized()},
+		{"Difference", paint.Difference, parity.Quantized()},
+		{"Exclusion", paint.Exclusion, parity.Quantized()},
 	}
 	for _, m := range modes {
 		t.Run(m.name, func(t *testing.T) {
-			parityTol(t, cpu.Render(sample.BlendScene(m.op), sample.W, sample.H), sample.BlendScene(m.op), m.tol)
+			gpuParity(t, cpu.Render(sample.BlendScene(m.op), sample.W, sample.H), sample.BlendScene(m.op), m.cfg)
 		})
 	}
 }
@@ -107,14 +87,14 @@ func TestParityClipPath(t *testing.T) {
 		nested bool
 	}{{"single", false}, {"nested", true}} {
 		t.Run(tc.name, func(t *testing.T) {
-			parity(t, cpu.Render(sample.ClipPathScene(tc.nested), sample.W, sample.H), sample.ClipPathScene(tc.nested))
+			gpuParity(t, cpu.Render(sample.ClipPathScene(tc.nested), sample.W, sample.H), sample.ClipPathScene(tc.nested), parity.Quantized())
 		})
 	}
 }
 
 func TestParityManySegments(t *testing.T) {
 	const w, h = 400, 300
-	parity(t, cpu.Render(sample.ManySegments(w, h, 300), w, h), sample.ManySegments(w, h, 300))
+	gpuParity(t, cpu.Render(sample.ManySegments(w, h, 300), w, h), sample.ManySegments(w, h, 300), parity.Quantized())
 }
 
 func TestResizeParity(t *testing.T) {
@@ -147,21 +127,7 @@ func TestResizeParity(t *testing.T) {
 		t.Fatalf("readback size = %v, want %dx%d", got.Rect, w1, h1)
 	}
 
-	want := cpu.Render(sample.ManyNodes(w1, h1, 12, 8), w1, h1)
-	maxd := 0
-	for i := range want.Pix {
-		d := int(got.Pix[i]) - int(want.Pix[i])
-		if d < 0 {
-			d = -d
-		}
-		if d > maxd {
-			maxd = d
-		}
-	}
-	t.Logf("post-resize max channel delta=%d", maxd)
-	if maxd > 2 {
-		t.Fatalf("gpu/cpu mismatch after resize: max channel delta=%d", maxd)
-	}
+	parity.Assert(t, got, cpu.Render(sample.ManyNodes(w1, h1, 12, 8), w1, h1), parity.Identical())
 }
 
 func TestUnchangedSceneSkips(t *testing.T) {
@@ -229,5 +195,5 @@ func clipScene() *scene.Scene {
 }
 
 func TestParityClip(t *testing.T) {
-	parity(t, cpu.Render(clipScene(), 96, 96), clipScene())
+	gpuParity(t, cpu.Render(clipScene(), 96, 96), clipScene(), parity.Identical())
 }

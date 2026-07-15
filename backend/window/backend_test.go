@@ -6,22 +6,9 @@ import (
 
 	"github.com/stohirov/sukho/backend/cpu"
 	"github.com/stohirov/sukho/backend/gpu"
+	"github.com/stohirov/sukho/internal/parity"
 	"github.com/stohirov/sukho/internal/sample"
 )
-
-func maxDelta(a, b *image.RGBA) int {
-	maxd := 0
-	for i := range a.Pix {
-		d := int(a.Pix[i]) - int(b.Pix[i])
-		if d < 0 {
-			d = -d
-		}
-		if d > maxd {
-			maxd = d
-		}
-	}
-	return maxd
-}
 
 func TestBackendParityAndResize(t *testing.T) {
 	gr, err := gpu.NewRenderer(sample.W, sample.H)
@@ -42,9 +29,7 @@ func TestBackendParityAndResize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gpu frame: %v", err)
 	}
-	if d := maxDelta(cimg, gimg); d > 2 {
-		t.Fatalf("cpu/gpu backend mismatch: max channel delta=%d", d)
-	}
+	parity.Assert(t, gimg, cimg, parity.Quantized())
 
 	const w2, h2 = 320, 200
 	if err := cb.resize(w2, h2); err != nil {
@@ -69,7 +54,5 @@ func TestBackendParityAndResize(t *testing.T) {
 	if gimg2.Rect.Dx() != w2 || gimg2.Rect.Dy() != h2 {
 		t.Fatalf("gpu frame size after resize = %v", gimg2.Rect)
 	}
-	if d := maxDelta(cimg2, gimg2); d > 2 {
-		t.Fatalf("cpu/gpu backend mismatch after resize: max channel delta=%d", d)
-	}
+	parity.Assert(t, gimg2, cimg2, parity.Identical())
 }
