@@ -13,10 +13,14 @@ const (
 	EvenOdd
 )
 
+// BlendMode and CompositeOp mirror paint's two axes. They are duplicated rather
+// than imported because raster is the arithmetic layer and does not depend on
+// paint; the backends cast across. See paint.BlendMode / paint.CompositeOp for
+// what the axes mean.
 type BlendMode uint8
 
 const (
-	SrcOver BlendMode = iota
+	Normal BlendMode = iota
 	Multiply
 	Screen
 	Overlay
@@ -29,6 +33,59 @@ const (
 	Difference
 	Exclusion
 )
+
+type CompositeOp uint8
+
+const (
+	SrcOver CompositeOp = iota
+	Clear
+	Src
+	Dst
+	DstOver
+	SrcIn
+	DstIn
+	SrcOut
+	DstOut
+	SrcAtop
+	DstAtop
+	Xor
+)
+
+// Coefficients returns Porter-Duff's (Fa, Fb) for an operator at source alpha as
+// and backdrop alpha ab, weighting the source and backdrop contributions:
+//
+//	co = as·Fa·Cs + ab·Fb·Cb        ao = as·Fa + ab·Fb
+//
+// This is the whole table, stated once. raster.wgsl's pdCoeff is a verbatim port
+// and the two must not drift — a divergence here is not a rounding artifact but
+// two renderers computing different functions, which no tolerance should absorb.
+func Coefficients(op CompositeOp, as, ab float64) (fa, fb float64) {
+	switch op {
+	case Clear:
+		return 0, 0
+	case Src:
+		return 1, 0
+	case Dst:
+		return 0, 1
+	case DstOver:
+		return 1 - ab, 1
+	case SrcIn:
+		return ab, 0
+	case DstIn:
+		return 0, as
+	case SrcOut:
+		return 1 - ab, 0
+	case DstOut:
+		return 0, 1 - as
+	case SrcAtop:
+		return ab, 1 - as
+	case DstAtop:
+		return 1 - ab, as
+	case Xor:
+		return 1 - ab, 1 - as
+	}
+	return 1, 1 - as // SrcOver
+}
 
 type Rasterizer struct {
 	w, h   int

@@ -16,6 +16,7 @@ type state struct {
 	clip      *geom.Rect
 	clipPaths []scene.ClipPath
 	blend     paint.BlendMode
+	composite paint.CompositeOp
 	fallback  bool
 }
 
@@ -47,6 +48,11 @@ func (c *Canvas) Rotate(theta float64)     { c.Transform(geom.Rotate(theta)) }
 func (c *Canvas) CTM() geom.Matrix { return c.st.ctm }
 
 func (c *Canvas) SetBlend(mode paint.BlendMode) { c.st.blend = mode }
+
+// SetComposite selects how subsequent nodes' COVERAGE combines with the
+// backdrop's — the Porter-Duff axis, independent of SetBlend's color axis. Saved
+// and restored with the rest of the canvas state.
+func (c *Canvas) SetComposite(op paint.CompositeOp) { c.st.composite = op }
 
 // SetFallback routes subsequent nodes through the CPU reference on backends
 // that cannot render them exactly. See scene.Node.Fallback; it is saved and
@@ -94,6 +100,7 @@ func (c *Canvas) Fill(p path.Path, pt paint.Paint, rule paint.FillRule) {
 		Transform: c.st.ctm,
 		Paint:     pt,
 		Op:        c.st.blend,
+		Composite: c.st.composite,
 		FillRule:  rule,
 		Clip:      c.st.clip,
 		Clips:     c.st.clipPaths,
@@ -112,6 +119,7 @@ func (c *Canvas) Stroke(p path.Path, pt paint.Paint, s paint.Stroke) {
 		Transform: c.st.ctm,
 		Paint:     pt,
 		Op:        c.st.blend,
+		Composite: c.st.composite,
 		Stroke:    &sc,
 		Clip:      c.st.clip,
 		Clips:     c.st.clipPaths,

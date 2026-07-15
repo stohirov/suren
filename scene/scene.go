@@ -20,7 +20,11 @@ type Node struct {
 	Path      path.Path
 	Transform geom.Matrix
 	Paint     paint.Paint
+	// Op and Composite are the two independent compositing axes: Op combines the
+	// colors, Composite combines the coverages. Their zero values (Normal,
+	// SrcOver) are the ordinary "paint this on top" behavior.
 	Op        paint.BlendMode
+	Composite paint.CompositeOp
 	FillRule  paint.FillRule
 	Stroke    *paint.Stroke
 	Clip      *geom.Rect

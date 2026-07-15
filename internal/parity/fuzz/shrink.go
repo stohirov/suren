@@ -121,7 +121,8 @@ func shrinkFeatures(s Spec, fails Fails) Spec {
 		try(node().Paint.Kind != PaintSolid, func(n *NodeSpec) { n.Paint = n.Paint.solid() })
 		try(node().Shape.Kind != ShapeRect, func(n *NodeSpec) { n.Shape = n.Shape.bboxRect() })
 		try(node().Transform != geom.Identity(), func(n *NodeSpec) { n.Transform = geom.Identity() })
-		try(node().Op != paint.SrcOver, func(n *NodeSpec) { n.Op = paint.SrcOver })
+		try(node().Op != paint.Normal, func(n *NodeSpec) { n.Op = paint.Normal })
+		try(node().Composite != paint.SrcOver, func(n *NodeSpec) { n.Composite = paint.SrcOver })
 		try(node().Rule != paint.NonZero, func(n *NodeSpec) { n.Rule = paint.NonZero })
 	}
 	return s

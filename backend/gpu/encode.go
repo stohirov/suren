@@ -144,7 +144,7 @@ func EncodeInto(e *Encoded, s *scene.Scene, w, h int) {
 			SegCount: uint32(len(e.Segments)) - start,
 			Rule:     rule,
 			Kind:     uint32(kind),
-			Flags:    uint32(n.Op),
+			Flags:    packFlags(n.Op, n.Composite),
 			BBox:     bbox,
 		}
 		e.fillPaint(&nd, kind, n)
@@ -445,6 +445,17 @@ func setClip(nd *Node, r *geom.Rect, w, h int) {
 	}
 	nd.Clip = [4]float32{float32(r.Min.X), float32(r.Min.Y), float32(r.Max.X), float32(r.Max.Y)}
 	nd.HasClip = 1
+}
+
+// packFlags carries both compositing axes in one word: the blend mode in bits
+// 0-3, the Porter-Duff operator in bits 4-7. Each enum has 12 members and so
+// needs 4 bits; raster.wgsl's composite() unpacks with the same shifts.
+//
+// Packing rather than adding a field keeps the GPU Node at its current size and
+// layout, which is hand-mirrored in WGSL — a new field would have to be inserted
+// in both, in order, for two bits of payload.
+func packFlags(op paint.BlendMode, comp paint.CompositeOp) uint32 {
+	return (uint32(op) & 0xF) | ((uint32(comp) & 0xF) << 4)
 }
 
 func seg(a, b geom.Point) Segment {

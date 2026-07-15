@@ -184,13 +184,14 @@ type ClipSpec struct {
 }
 
 type NodeSpec struct {
-	Shape     ShapeSpec       `json:"shape"`
-	Transform geom.Matrix     `json:"transform"`
-	Paint     PaintSpec       `json:"paint"`
-	Op        paint.BlendMode `json:"op,omitempty"`
-	Rule      paint.FillRule  `json:"rule,omitempty"`
-	Stroke    *StrokeSpec     `json:"stroke,omitempty"`
-	Clips     []ClipSpec      `json:"clips,omitempty"`
+	Shape     ShapeSpec         `json:"shape"`
+	Transform geom.Matrix       `json:"transform"`
+	Paint     PaintSpec         `json:"paint"`
+	Op        paint.BlendMode   `json:"op,omitempty"`
+	Composite paint.CompositeOp `json:"composite,omitempty"`
+	Rule      paint.FillRule    `json:"rule,omitempty"`
+	Stroke    *StrokeSpec       `json:"stroke,omitempty"`
+	Clips     []ClipSpec        `json:"clips,omitempty"`
 }
 
 // Spec carries no JSON tags: codec.go marshals it through specJSON so the
@@ -228,6 +229,7 @@ func (s Spec) Scene() *scene.Scene {
 			}
 		}
 		c.SetBlend(n.Op)
+		c.SetComposite(n.Composite)
 		if n.Stroke != nil {
 			c.Stroke(n.Shape.Path(), n.Paint.Paint(), n.Stroke.Stroke())
 		} else {
@@ -269,17 +271,48 @@ func (s Spec) Validate() error {
 // scene cannot be gated by a global knob precisely because nobody chose what is
 // in it.
 //
-// One general (non-SrcOver) blend node is held to the exact floor. Two or more
-// earn the stacking budget. Every gate is exact: nothing here is unreachable
-// enough to need perceptual mode.
+// The budget is earned by a general (non-Normal) blend node reading a backdrop
+// that ALREADY carries a sub-LSB f32-vs-f64 difference, because such a blend
+// amplifies it past the floor. Two things can leave that difference:
+//
+//   - another general blend node before it (two or more general nodes), or
+//   - a gradient, whose parameter the two backends evaluate at different
+//     precision.
+//
+// Everything else is held to the exact floor. Every gate is exact: nothing here
+// is unreachable enough to need perceptual mode.
+//
+// # The gradient clause is a fuzz find, not a prediction (Phase 15)
+//
+// The rule used to count only blend nodes, and "one general mode is exact" was
+// asserted as a fact. It is not: seed 0xb50 shrank to three nodes — an opaque
+// background, a radial-gradient rect, and ONE SoftLight rect — and diverged at
+// Δ=2, one channel of 36864, against this function's Quantized gate. The scene
+// is recorded as corpus regress/fuzz-softlight-over-gradient.json.
+//
+// The mechanism was already written down in stackedBlend's own reason, which
+// names "the 1 LSB that f32-vs-f64 coverage and GRADIENT evaluation leave"; the
+// rule simply never asked whether a gradient was present, only whether a second
+// blend node was. So the old rule contradicted the budget it selected.
+//
+// It is a pre-existing hole rather than a Phase 15 regression, and that was
+// verified rather than assumed: the minimized scene contains no Porter-Duff
+// operator at all, and replaying it against the tree as of the previous commit
+// reproduces Δ=2 at the same pixel. Phase 15 found it only because adding a
+// composite draw to the generator reshuffled every seed's scene — which is worth
+// remembering about this whole apparatus: the seeds are not a fixed test set,
+// and a generator change re-rolls the dice on all of them.
 func (s Spec) Tol() parity.Config {
-	general := 0
+	general, gradient := 0, false
 	for _, n := range s.Nodes {
-		if n.Op != paint.SrcOver {
+		if n.Op != paint.Normal {
 			general++
 		}
+		if n.Paint.Kind != PaintSolid {
+			gradient = true
+		}
 	}
-	if general >= 2 {
+	if general >= 2 || (general >= 1 && gradient) {
 		return stackedBlend
 	}
 	return parity.Quantized()
@@ -332,8 +365,11 @@ var illConditioned = map[paint.BlendMode]bool{
 // removes that. Retiring this budget needs the two backends to compute in the
 // same precision — which Phase 11 rejected on purpose, since matching the other
 // backend's rounding rather than the true value is the worse trade.
+// Phase 15 widened WHEN this is earned without changing what it says: a blend
+// node reading a gradient hits the same mechanism as one reading another blend
+// node, and the reason below already said so. See Tol.
 var stackedBlend = parity.Budget(2,
-	"a second blend node reads an already-quantized backdrop and a blend with dB/dCb>1 amplifies the 1 LSB that f32-vs-f64 coverage and gradient evaluation leave there; measured flat at Δ≤2 for 2-4 stacked nodes over 25000 seeds")
+	"a blend node with dB/dCb>1 reads a backdrop that is already 1 LSB apart — left there by a previous blend node, or by f32-vs-f64 evaluation of a gradient — and amplifies it; measured flat at Δ≤2 for 2-4 stacked nodes over 25000 seeds")
 
 // clone copies the node slice so a caller may replace fields of one node without
 // mutating the original. Fields holding slices (Pts, Stops, Dashes, Clips) are
@@ -361,7 +397,10 @@ func (s Spec) size() int {
 		if nd.Transform != geom.Identity() {
 			n++
 		}
-		if nd.Op != paint.SrcOver {
+		if nd.Op != paint.Normal {
+			n++
+		}
+		if nd.Composite != paint.SrcOver {
 			n++
 		}
 	}

@@ -142,10 +142,49 @@ func BlendScene(op paint.BlendMode) *scene.Scene {
 	solid := func(p path.Path, c paint.Color, blend paint.BlendMode) {
 		s.Add(scene.Node{Path: p, Transform: geom.Identity(), Paint: paint.Solid{Color: c}, Op: blend, FillRule: paint.NonZero})
 	}
-	solid(path.Rect(geom.RectXYWH(0, 0, W*0.7, H)), paint.RGBA(0.12, 0.16, 0.28, 0.85), paint.SrcOver)
-	solid(path.Circle(geom.Pt(W*0.35, H*0.5), H*0.32), paint.FromRGBA8(240, 200, 60, 255), paint.SrcOver)
+	solid(path.Rect(geom.RectXYWH(0, 0, W*0.7, H)), paint.RGBA(0.12, 0.16, 0.28, 0.85), paint.Normal)
+	solid(path.Circle(geom.Pt(W*0.35, H*0.5), H*0.32), paint.FromRGBA8(240, 200, 60, 255), paint.Normal)
 	solid(path.Circle(geom.Pt(W*0.62, H*0.5), H*0.36), paint.RGBA(0.20, 0.72, 0.90, 0.7), op)
 	return s
+}
+
+// CompositeScene exercises one Porter-Duff operator against every backdrop
+// regime it can distinguish. The three coefficient tables that differ only in
+// how they treat αb — SrcIn vs SrcOut, SrcAtop vs Src — are indistinguishable
+// over a single backdrop, so the frame is banded into thirds: opaque (αb=1),
+// translucent (αb=0.5), and empty (αb=0). An operator that got Fa or Fb wrong
+// for one regime would still match over the other two.
+//
+// The source is an antialiased circle, deliberately: its edge is where coverage
+// is strictly between 0 and 1, which is the only place the coverage lerp in
+// raster.porterDuff is observable. A pixel-aligned source would render every
+// operator correctly even with coverage folded into αs, and would gate nothing
+// this phase got wrong.
+//
+// The source is also translucent (αs=0.75), so DstIn/DstOut/DstAtop — whose
+// coefficients read αs and ignore the source COLOR entirely — cannot pass by
+// accident with an opaque source that makes their Fb collapse to 0 or 1.
+// mode is the other axis, and passing anything but Normal is what makes the two
+// axes CROSS. That matters because the GPU packs both into one flags word
+// (encode.go packFlags): a shift or mask off by one bit would let an operator
+// leak into the blend mode's bits, which no scene that leaves one axis at its
+// default can see — the leaked value would land on the identity.
+func CompositeScene(op paint.CompositeOp, mode paint.BlendMode) *scene.Scene {
+	c := render.NewCanvas()
+	third := float64(W) / 3
+	c.FillColor(path.Rect(geom.RectXYWH(0, 0, third, H)), paint.FromRGBA8(230, 120, 60, 255))
+	c.Fill(path.Rect(geom.RectXYWH(third, 0, third, H)),
+		paint.Solid{Color: paint.RGBA(0.20, 0.72, 0.90, 0.5)}, paint.NonZero)
+	// The final third is left untouched: αb=0, where DstOver and SrcOut show the
+	// source and SrcIn and DstIn must show nothing.
+
+	c.SetComposite(op)
+	c.SetBlend(mode)
+	c.Fill(path.Circle(geom.Pt(W*0.5, H*0.5), H*0.38),
+		paint.Solid{Color: paint.RGBA(0.95, 0.85, 0.20, 0.75)}, paint.NonZero)
+	c.SetComposite(paint.SrcOver)
+	c.SetBlend(paint.Normal)
+	return c.Scene()
 }
 
 // BlendStack layers n translucent quads with the same blend op.

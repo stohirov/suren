@@ -40,8 +40,53 @@ const (
 // Spec.Tol still gates them correctly if a stored spec contains one, because Tol
 // is a function of the scene, not of this generator.
 var blendModes = []paint.BlendMode{
-	paint.SrcOver, paint.Multiply, paint.Screen, paint.Overlay, paint.Darken, paint.Lighten,
+	paint.Normal, paint.Multiply, paint.Screen, paint.Overlay, paint.Darken, paint.Lighten,
 	paint.HardLight, paint.SoftLight, paint.Difference, paint.Exclusion,
+}
+
+// compositeOps is the full Porter-Duff set MINUS Clear, Src and Dst, and unlike
+// blendModes the omission is about the ORACLE'S REACH, not the operators'
+// conditioning. All twelve are well-conditioned; these three are excluded
+// because of what they do to the generated scene:
+//
+//   - Clear and Src discard the backdrop wholesale. A scene ending in one is a
+//     scene whose earlier nodes never mattered, so the generator would spend its
+//     budget rendering work it then erased, and the shrinker would find every
+//     bug reduced to a single node.
+//   - Dst is the identity on the framebuffer. It contributes nothing to render
+//     and nothing to diverge.
+//
+// None of the three is left untested: each has a corpus entry over all three
+// backdrop regimes, where its effect is the point rather than an obstacle. What
+// is lost here is only their INTERACTION with generated geometry, and since all
+// three ignore at least one operand entirely, there is little interaction to
+// lose. The nine that read both operands are the ones worth generating.
+var compositeOps = []paint.CompositeOp{
+	paint.SrcOver, paint.DstOver, paint.SrcIn, paint.DstIn, paint.SrcOut,
+	paint.DstOut, paint.SrcAtop, paint.DstAtop, paint.Xor,
+}
+
+// randComposite biases hard toward SrcOver, and the bias is what keeps the
+// oracle alive rather than a hedge against the operators.
+//
+// Sampling the nine uniformly took the generator's trivial-scene rate from 0.8%
+// to 4.0%, past the 3% gate. The cause is not a bug: an operator like SrcOut
+// over an opaque backdrop is DEFINED to erase, so a large node carrying one
+// wipes the frame to uniform transparency and the differential has nothing left
+// to compare. Raising the gate to fit would have inverted its purpose — it
+// exists to fail exactly when a generator change starts drawing nothing.
+//
+// So a node keeps SrcOver unless it draws below the threshold. Measured trivial
+// rate over 1000 seeds against the 3% gate: 0.8% with no composite ops at all,
+// 1.7% at 1/10, 1.8% at 2/10, 2.4% at 3/10, 4.0% sampling all nine uniformly.
+// 2/10 is the pick — it doubles the baseline rate while keeping better than a
+// third of the gate in hand for seed variation, and still lands a non-SrcOver
+// operator in roughly a fifth of all nodes.
+func randComposite(rng *rand.Rand) paint.CompositeOp {
+	if rng.IntN(10) < 2 {
+		return compositeOps[1+rng.IntN(len(compositeOps)-1)]
+	}
+	return paint.SrcOver
 }
 
 func newRNG(seed uint64) *rand.Rand {
@@ -79,9 +124,10 @@ func randNode(rng *rand.Rand) NodeSpec {
 		Transform: randTransform(rng),
 		Paint:     randPaint(rng),
 		Op:        blendModes[rng.IntN(len(blendModes))],
+		Composite: randComposite(rng),
 		Rule:      randRule(rng),
 	}
-	if rng.IntN(10) < 3 {
+	if rng.IntN(10) < 2 {
 		n.Stroke = randStroke(rng)
 	}
 	for range rng.IntN(3) {

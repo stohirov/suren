@@ -109,17 +109,32 @@ func TestTolIsEarnedFromSceneContent(t *testing.T) {
 		}
 		return s
 	}
+	// A solid background under one gradient-painted node carrying op.
+	gradSpec := func(op paint.BlendMode) Spec {
+		grad := node(op)
+		grad.Paint = PaintSpec{Kind: PaintRadial, Radius: 20, Stops: []paint.Stop{
+			{Offset: 0, Color: paint.RGB(1, 0, 0)},
+			{Offset: 1, Color: paint.RGB(0, 0, 1)},
+		}}
+		return Spec{W: W, H: H, Nodes: []NodeSpec{node(paint.Normal), grad}}
+	}
 
 	for _, tc := range []struct {
 		name string
 		spec Spec
 		want parity.Config
 	}{
-		{"no blending is exact", spec(paint.SrcOver, paint.SrcOver), parity.Quantized()},
-		{"one general mode is exact", spec(paint.SrcOver, paint.Overlay), parity.Quantized()},
-		{"one ill-conditioned mode is still only the floor", spec(paint.SrcOver, paint.ColorDodge), parity.Quantized()},
+		{"no blending is exact", spec(paint.Normal, paint.Normal), parity.Quantized()},
+		{"one general mode over solids is exact", spec(paint.Normal, paint.Overlay), parity.Quantized()},
+		{"one ill-conditioned mode is still only the floor", spec(paint.Normal, paint.ColorDodge), parity.Quantized()},
 		{"two general modes earn the stacking budget", spec(paint.Overlay, paint.Multiply), stackedBlend},
 		{"three general modes earn the same", spec(paint.Overlay, paint.Multiply, paint.Screen), stackedBlend},
+		// The Phase 15 fuzz find, as a unit case. A gradient anywhere in the scene
+		// leaves a backdrop the two backends already disagree about by an LSB, so
+		// ONE blend node is enough to amplify it past the floor — the case the old
+		// rule called exact and seed 0xb50 disproved.
+		{"one general mode over a gradient earns the budget", gradSpec(paint.Overlay), stackedBlend},
+		{"a gradient with no blending stays at the floor", gradSpec(paint.Normal), parity.Quantized()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := tc.spec.Tol()

@@ -43,7 +43,10 @@ func Laws() []Law {
 		{Name: "affine-composition", Tol: parity.Identical(), Run: AffineComposition, Scene: affineScene},
 		{Name: "clip-idempotence", Tol: parity.Identical(), Run: ClipIdempotence, Scene: clipScene},
 		{Name: "premultiply-round-trip", Tol: parity.Identical(), Run: PremultiplyRoundTrip, Scene: premulScene},
-		{Name: "compositing-associativity", Tol: assocTol, Run: CompositingAssociativity, Scene: assocScene},
+		{Name: "compositing-associativity", Tol: assocTol, Run: CompositingAssociativity(paint.SrcOver), Scene: assocScene(paint.SrcOver)},
+		// The second witness. See CompositingAssociativity for why these two are
+		// the only operators of the twelve that can carry this law.
+		{Name: "compositing-associativity-dst-over", Tol: assocTol, Run: CompositingAssociativity(paint.DstOver), Scene: assocScene(paint.DstOver)},
 	}
 }
 
@@ -161,7 +164,7 @@ func PremultiplyRoundTrip(t testing.TB, r RenderFunc, seed uint64, cfg parity.Co
 	mode := randBlendGeneral(rng)
 	rect := randAlignedRect(rng)
 
-	want := r(fillScene(rect, col, paint.SrcOver), W, H)
+	want := r(fillScene(rect, col, paint.Normal), W, H)
 	requireNonTrivial(t, "premultiply-round-trip", seed, want)
 	check(t, "premultiply-round-trip", seed, r(fillScene(rect, col, mode), W, H), want, cfg)
 }
@@ -219,63 +222,112 @@ func CheckAgreement(t *testing.T, got, want RenderFunc, cfg parity.Config) {
 
 func seedName(seed uint64) string { return fmt.Sprintf("seed=0x%x", seed) }
 
-// CompositingAssociativity: SrcOver is associative, so rendering a scene whole
-// must equal rendering a prefix and a suffix separately and compositing the two.
+// CompositingAssociativity: rendering a scene whole must equal rendering a
+// prefix and a suffix separately and compositing the two.
 //
-// Scenes composite left-to-right onto the framebuffer, so
-// render([A,B,C]) = C over (B over (A over T)). Splitting gives
-// X = render([A]) = A and Y = render([B,C]) = C over B (T is the identity for
-// over), and associativity says Y over X = (C over B) over A = the whole. The
-// law therefore pins that rendering is a pure fold over nodes with no cross-node
-// state — the grouped form (A over B) over C is not expressible until Phase 18
-// adds isolated layers, since a scene admits only one grouping today.
+// Scenes composite left-to-right onto the framebuffer, so with op X,
+// render([A,B,C]) = X(C, X(B, X(A, T))). Splitting gives P = render([A]) and
+// S = render([B,C]), and the law says X(S, P) = the whole. The law therefore
+// pins that rendering is a pure fold over nodes with no cross-node state — the
+// grouped form (A over B) over C is not expressible until Phase 18 adds isolated
+// layers, since a scene admits only one grouping today.
+//
+// # Which of the twelve operators this law can hold for (Phase 15)
+//
+// Two conditions, and most operators fail the second:
+//
+//   - X must be associative.
+//   - Transparent black T must be X's identity, or the fold's base case
+//     X(A, T) is not A and the prefix render is not P.
+//
+// SrcOver and DstOver pass both. DstOver is over with its operands swapped, so
+// the fold reverses paint order — render([A,B,C]) = A over B over C — and the
+// split recombines as over(P, S) rather than over(S, P). That is the only
+// difference between the two cases below, which is itself the point: it is a
+// nontrivial second witness for the same fold, reusing the same helper.
+//
+// The other ten do not qualify, and it is worth recording why rather than
+// leaving them silently unlisted:
+//
+//   - SrcIn, DstIn, SrcOut, DstOut, SrcAtop, DstAtop: T is not an identity. Each
+//     reads αb (or αs) in a coefficient that collapses against a transparent
+//     backdrop, so X(A,T) is transparent and the whole fold renders nothing.
+//   - Clear and Dst: T IS an identity, but the fold is constant — everything is
+//     transparent — so requireNonTrivial would (correctly) reject it as vacuous.
+//   - Src: associative with T an identity, but render([A,B,C]) = C. The law
+//     would hold by saying nothing.
+//   - Xor: T is its identity and its ALPHA is associative (a+b-2ab is symmetric
+//     in three arguments), which makes it the tempting near-miss. Its color is
+//     not: expanding both groupings, cx's coefficient is (1-ay)(1-az) one way and
+//     1-ay-az+2ayaz the other, which agree only when ay·az = 0. Alpha
+//     associativity is not associativity.
 //
 // The split render quantizes its intermediate to 8 bits where the whole render
 // keeps full precision, so this cannot be exact; that rounding is the gate's
 // named owner.
-func CompositingAssociativity(t testing.TB, r RenderFunc, seed uint64, cfg parity.Config) {
-	t.Helper()
-	a, b, c := assocNodes(seed)
+func CompositingAssociativity(op paint.CompositeOp) func(testing.TB, RenderFunc, uint64, parity.Config) {
+	return func(t testing.TB, r RenderFunc, seed uint64, cfg parity.Config) {
+		t.Helper()
+		name := "compositing-associativity/" + assocOpName(op)
+		a, b, c := assocNodes(seed, op)
 
-	whole := &scene.Scene{}
-	whole.Add(a)
-	whole.Add(b)
-	whole.Add(c)
+		whole := &scene.Scene{}
+		whole.Add(a)
+		whole.Add(b)
+		whole.Add(c)
 
-	prefix := &scene.Scene{}
-	prefix.Add(a)
+		prefix := &scene.Scene{}
+		prefix.Add(a)
 
-	suffix := &scene.Scene{}
-	suffix.Add(b)
-	suffix.Add(c)
+		suffix := &scene.Scene{}
+		suffix.Add(b)
+		suffix.Add(c)
 
-	batch := r(whole, W, H)
-	requireNonTrivial(t, "compositing-associativity", seed, batch)
-	split := over(r(suffix, W, H), r(prefix, W, H))
-	check(t, "compositing-associativity", seed, split, batch, cfg)
+		batch := r(whole, W, H)
+		requireNonTrivial(t, name, seed, batch)
+
+		p, s := r(prefix, W, H), r(suffix, W, H)
+		split := over(s, p)
+		if op == paint.DstOver {
+			// DstOver(S, P) = P over S: the fold paints under, so the recombination
+			// puts the prefix on top.
+			split = over(p, s)
+		}
+		check(t, name, seed, split, batch, cfg)
+	}
 }
 
-func assocNodes(seed uint64) (a, b, c scene.Node) {
+func assocOpName(op paint.CompositeOp) string {
+	if op == paint.DstOver {
+		return "dst-over"
+	}
+	return "src-over"
+}
+
+func assocNodes(seed uint64, op paint.CompositeOp) (a, b, c scene.Node) {
 	rng := newRNG(seed)
 	mk := func() scene.Node {
 		return scene.Node{
 			Path:      randPath(rng),
 			Transform: randAboutCenter(rng),
 			Paint:     paint.Solid{Color: randColor(rng)},
-			Op:        paint.SrcOver,
+			Op:        paint.Normal,
+			Composite: op,
 			FillRule:  paint.NonZero,
 		}
 	}
 	return mk(), mk(), mk()
 }
 
-func assocScene(seed uint64) (*scene.Scene, int, int) {
-	a, b, c := assocNodes(seed)
-	sc := &scene.Scene{}
-	sc.Add(a)
-	sc.Add(b)
-	sc.Add(c)
-	return sc, W, H
+func assocScene(op paint.CompositeOp) func(uint64) (*scene.Scene, int, int) {
+	return func(seed uint64) (*scene.Scene, int, int) {
+		a, b, c := assocNodes(seed, op)
+		sc := &scene.Scene{}
+		sc.Add(a)
+		sc.Add(b)
+		sc.Add(c)
+		return sc, W, H
+	}
 }
 
 // over composites premultiplied src over premultiplied dst, mirroring the

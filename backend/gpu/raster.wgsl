@@ -145,7 +145,69 @@ fn quant8(v: vec4<f32>) -> vec4<f32> {
   return floor(c * 255.0 + 0.5) * (1.0 / 255.0);
 }
 
-fn composite(mode: u32, dst: vec4<f32>, src: vec4<f32>, alpha: f32) -> vec4<f32> {
+// pdCoeff is a verbatim port of raster.Coefficients — Porter-Duff's (Fa, Fb) for
+// each operator. The two tables state the same twelve rows and must not drift:
+// a mismatch here is not a rounding artifact but the two backends computing
+// different functions, which no tolerance in this tree should absorb.
+fn pdCoeff(op: u32, sA: f32, bA: f32) -> vec2<f32> {
+  switch op {
+    case 1u: { return vec2<f32>(0.0, 0.0); }              // Clear
+    case 2u: { return vec2<f32>(1.0, 0.0); }              // Src
+    case 3u: { return vec2<f32>(0.0, 1.0); }              // Dst
+    case 4u: { return vec2<f32>(1.0 - bA, 1.0); }         // DstOver
+    case 5u: { return vec2<f32>(bA, 0.0); }               // SrcIn
+    case 6u: { return vec2<f32>(0.0, sA); }               // DstIn
+    case 7u: { return vec2<f32>(1.0 - bA, 0.0); }         // SrcOut
+    case 8u: { return vec2<f32>(0.0, 1.0 - sA); }         // DstOut
+    case 9u: { return vec2<f32>(bA, 1.0 - sA); }          // SrcAtop
+    case 10u: { return vec2<f32>(1.0 - bA, sA); }         // DstAtop
+    case 11u: { return vec2<f32>(1.0 - bA, 1.0 - sA); }   // Xor
+    default: { return vec2<f32>(1.0, 1.0 - sA); }         // SrcOver
+  }
+}
+
+// porterDuff mirrors raster/fill.go's function of the same name, term for term
+// and in the same order — the ordering audit Phase 13 ran on the blend path
+// applies here too, since f32 addition is not associative and a reordered sum is
+// a different number.
+//
+// cov lerps between the composited result and the untouched backdrop rather than
+// scaling sA. See the CPU comment for why: coverage is the fraction of the pixel
+// the operator applies to, not the source's alpha, and folding it into sA would
+// make a half-covered Clear erase the whole pixel.
+fn porterDuff(mode: u32, comp: u32, dst: vec4<f32>, src: vec4<f32>, cov: f32) -> vec4<f32> {
+  let sA = src.w;
+  let bA = dst.w;
+  var cs = vec3<f32>(0.0);
+  if (sA > 0.0) { cs = src.xyz / sA; }
+  var cb = vec3<f32>(0.0);
+  if (bA > 0.0) { cb = dst.xyz / bA; }
+
+  let bl = vec3<f32>(blendCh(mode, cb.x, cs.x),
+                     blendCh(mode, cb.y, cs.y),
+                     blendCh(mode, cb.z, cs.z));
+  let br = (1.0 - bA) * cs + bA * bl;
+
+  let f = pdCoeff(comp, sA, bA);
+  let co = sA * f.x * br + bA * f.y * cb;
+  let ao = sA * f.x + bA * f.y;
+
+  let inv = 1.0 - cov;
+  return vec4<f32>(co * cov + dst.xyz * inv, ao * cov + bA * inv);
+}
+
+// composite unpacks both axes from the node's flags word: blend mode in bits
+// 0-3, Porter-Duff operator in bits 4-7 (encode.go packFlags).
+fn composite(flags: u32, dst: vec4<f32>, src: vec4<f32>, alpha: f32) -> vec4<f32> {
+  let mode = flags & 0xFu;
+  let comp = (flags >> 4u) & 0xFu;
+  if (comp != 0u) {
+    return porterDuff(mode, comp, dst, src, alpha);
+  }
+  // SrcOver keeps its pre-Phase-15 arithmetic, matching the CPU's decision to do
+  // the same: porterDuff is algebraically equal for it but not bit-equal, and
+  // routing SrcOver through the general form would move every AA edge in the
+  // tree by an LSB to no end.
   let fa = src.w * alpha;
   if (mode == 0u) {
     let invc = 1.0 - fa;

@@ -62,7 +62,7 @@ func (r *Renderer) Render(s *scene.Scene) error {
 			clip = c
 		}
 		mask := r.clipMask(n.Clips, b)
-		r.ras.FillPaint(r.Img, geo, n.Transform, sh, rule, clip, raster.BlendMode(n.Op), mask, r.Tiles)
+		r.ras.FillPaint(r.Img, geo, n.Transform, sh, rule, clip, raster.BlendMode(n.Op), raster.CompositeOp(n.Composite), mask, r.Tiles)
 	}
 	return nil
 }

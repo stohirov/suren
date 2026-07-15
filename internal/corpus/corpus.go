@@ -30,7 +30,9 @@ var blendModes = []struct {
 	op   paint.BlendMode
 	tol  parity.Config
 }{
-	{"srcover", paint.SrcOver, parity.Quantized()},
+	// "normal", not "srcover": Phase 15 gave that name to the Porter-Duff
+	// operator it always belonged to. This row is the blend axis's identity.
+	{"normal", paint.Normal, parity.Quantized()},
 	{"multiply", paint.Multiply, parity.Quantized()},
 	{"screen", paint.Screen, parity.Quantized()},
 	{"overlay", paint.Overlay, parity.Quantized()},
@@ -50,6 +52,27 @@ var blendModes = []struct {
 	{"exclusion", paint.Exclusion, parity.Quantized()},
 }
 
+// compositeOps is the full Porter-Duff set. It is exhaustive on purpose: the
+// operators differ only in two coefficients, so a table with a wrong row looks
+// exactly like a table with a right one until the row is rendered.
+var compositeOps = []struct {
+	name string
+	op   paint.CompositeOp
+}{
+	{"src-over", paint.SrcOver},
+	{"clear", paint.Clear},
+	{"src", paint.Src},
+	{"dst", paint.Dst},
+	{"dst-over", paint.DstOver},
+	{"src-in", paint.SrcIn},
+	{"dst-in", paint.DstIn},
+	{"src-out", paint.SrcOut},
+	{"dst-out", paint.DstOut},
+	{"src-atop", paint.SrcAtop},
+	{"dst-atop", paint.DstAtop},
+	{"xor", paint.Xor},
+}
+
 func All() []Entry {
 	entries := []Entry{
 		{"solid", sample.W, sample.H, sample.Scene, parity.Quantized()},
@@ -64,7 +87,7 @@ func All() []Entry {
 		// whether both backends quantize each node the same way. They gate
 		// Phase 13's per-node rounding, and 64 deep is where a regression shows as
 		// Δ=10 rather than as the single LSB visible at typical depths.
-		{"blend-stack-srcover", 96, 96, func() *scene.Scene { return sample.BlendStack(64, paint.SrcOver) }, parity.Identical()},
+		{"blend-stack-normal", 96, 96, func() *scene.Scene { return sample.BlendStack(64, paint.Normal) }, parity.Identical()},
 		{"blend-stack-overlay", 96, 96, func() *scene.Scene { return sample.BlendStack(64, paint.Overlay) }, parity.Identical()},
 		// Identical because of the fallback, not despite it: this scene holds a
 		// gradient that the GPU renders at Δ=1, marked for per-tile CPU fallback
@@ -82,6 +105,55 @@ func All() []Entry {
 			H:     sample.H,
 			Build: func() *scene.Scene { return sample.BlendScene(b.op) },
 			Tol:   b.tol,
+		})
+	}
+	// One entry per Porter-Duff operator (Phase 15), each over all three backdrop
+	// regimes — see sample.CompositeScene. No operator earned a budget; if one
+	// ever does, the reason goes here and not into a widened default.
+	//
+	// These measure Δ=0 on Metal today, but they are gated at Quantized and not
+	// Identical, and the gap is deliberate. Identical is the contract's gate for
+	// paths where the two backends run the same integer/analytic arithmetic and
+	// so CANNOT diverge. These do not qualify: porterDuff unpremultiplies through
+	// a division and lerps by coverage, all in f32 against the reference's f64.
+	// Δ=0 here is a fact about these colors on this driver, not a property, and
+	// gating on it would be reading luck as a guarantee.
+	for _, o := range compositeOps {
+		entries = append(entries, Entry{
+			Name:  "composite-" + o.name,
+			W:     sample.W,
+			H:     sample.H,
+			Build: func() *scene.Scene { return sample.CompositeScene(o.op, paint.Normal) },
+			Tol:   parity.Quantized(),
+		})
+	}
+	// The two axes crossed. Every entry above leaves the blend axis at Normal and
+	// every blend-* entry leaves the composite axis at SrcOver, so neither family
+	// can see the two being confused for one another — and the GPU packs both
+	// into one flags word, so confusing them is an off-by-one away.
+	//
+	// This is measured, not hypothesized. Widening the shader's blend-mode mask
+	// from 0xF to 0xFF lets the composite bits leak into the mode, and every
+	// single-axis entry above still PASSES: with one axis at its zero value the
+	// leaked bits either are zero or land past the end of blendCh's switch, where
+	// the default returns the source color — which is exactly what Normal does.
+	// The four entries below are the complete set that goes red.
+	for _, x := range []struct {
+		name string
+		op   paint.CompositeOp
+		mode paint.BlendMode
+	}{
+		{"xor-multiply", paint.Xor, paint.Multiply},
+		{"src-atop-overlay", paint.SrcAtop, paint.Overlay},
+		{"dst-over-difference", paint.DstOver, paint.Difference},
+		{"src-in-color-dodge", paint.SrcIn, paint.ColorDodge},
+	} {
+		entries = append(entries, Entry{
+			Name:  "composite-x-blend-" + x.name,
+			W:     sample.W,
+			H:     sample.H,
+			Build: func() *scene.Scene { return sample.CompositeScene(x.op, x.mode) },
+			Tol:   parity.Quantized(),
 		})
 	}
 	// Regressions are embedded at compile time, so a decode failure is a defect

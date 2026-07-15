@@ -10,10 +10,20 @@ const (
 	EvenOdd
 )
 
+// BlendMode answers how a source and backdrop COLOR combine — the W3C
+// mix-blend-mode axis. It is orthogonal to CompositeOp, which answers how their
+// COVERAGE combines; a node carries one of each.
+//
+// Normal is the W3C name for "take the source color", and it is what this enum's
+// zero value has always meant. It was called SrcOver until Phase 15, which is
+// the name of a Porter-Duff OPERATOR and not of a blend function: the old name
+// conflated the two axes at exactly the point they had to come apart. Every
+// scene that said SrcOver meant Normal blending under a source-over composite,
+// which is now spelled with the two fields it was always two facts about.
 type BlendMode uint8
 
 const (
-	SrcOver BlendMode = iota
+	Normal BlendMode = iota
 	Multiply
 	Screen
 	Overlay
@@ -25,6 +35,37 @@ const (
 	SoftLight
 	Difference
 	Exclusion
+)
+
+// CompositeOp answers how a source and backdrop COVERAGE combine — the twelve
+// Porter-Duff operators, the W3C composite axis. Orthogonal to BlendMode.
+//
+// SrcOver is the zero value, so a node that names neither axis composites the
+// way every node did before Phase 15.
+//
+// The operators are a pair of coefficients (Fa, Fb) applied to the source and
+// backdrop contributions:
+//
+//	co = αs·Fa·Cs + αb·Fb·Cb        αo = αs·Fa + αb·Fb
+//
+// where Cs is the source color AFTER blending with the backdrop. See
+// raster.Coefficients for the table; it is stated once and ported verbatim to
+// raster.wgsl.
+type CompositeOp uint8
+
+const (
+	SrcOver CompositeOp = iota
+	Clear
+	Src
+	Dst
+	DstOver
+	SrcIn
+	DstIn
+	SrcOut
+	DstOut
+	SrcAtop
+	DstAtop
+	Xor
 )
 
 type Color struct {
