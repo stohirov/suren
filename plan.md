@@ -1037,7 +1037,8 @@ Porter-Duff operator at all**. `Spec.Tol()` gave the stacking budget only to sce
 blend nodes, while the budget's own stated reason already named "the 1 LSB that f32-vs-f64 coverage and
 **gradient** evaluation leave" — so the rule contradicted the budget it was selecting, and "one general
 mode is exact" was asserted rather than measured. A gradient leaves that LSB just as a prior blend node
-does. Fixed: `general >= 2 || (general >= 1 && gradient)`.
+does. Fixed here as `general >= 2 || (general >= 1 && gradient)` — **which was also wrong, and for the
+same reason: it blamed a correlate.** See the review note below.
 
 This was **verified pre-existing, not argued**: the minimized scene was replayed against the previous
 commit's tree and reproduces Δ=2 at the same pixel (39,53) with no Porter-Duff in the tree. Phase 15
@@ -1048,6 +1049,44 @@ green fuzz run as coverage of a fixed space. Recorded as `regress/fuzz-softlight
 
 With the rule corrected, **436,603 differential executions** over the widened space (composite ops
 generated) found nothing further.
+
+**Post-review: the tolerance rule, measured rather than reasoned.** Both rules above keyed on a
+correlate instead of the mechanism, and the second was wrong the same way the first was. The budget's
+own reason names the cause — an operation whose output moves further than its inputs are apart — so
+the rule should ask only that. Investigated by measurement, and every step overturned a guess:
+
+- **Which blend modes amplify.** `max|dB/dCb|` scanned numerically over the unit square: Overlay
+  **2.0**, SoftLight **4.0**; Normal 0; Multiply, Screen, Darken, Lighten, **HardLight**, Difference,
+  Exclusion all exactly **1.0**. HardLight is Overlay's transpose and looks like it should amplify —
+  its `2·cs` branch only runs when `cs ≤ 0.5`, so it does not. Where `|dCo/dCb| ≤ 1` a 1-LSB input
+  difference *cannot* become 2, because `floor(x+.5)` of two reals within 1 of each other cannot
+  differ by 2. That is arithmetic, not luck, and it is why those modes need no budget.
+- **The gradient was never the cause.** One Overlay node over **solids only** — which the shipped rule
+  gated at `Quantized` — breaches at Δ=2 in **2 of 5955** generated scenes. With a gradient the same
+  node breaches in **42 of 904**. The gradient is a ~40× risk multiplier, which is exactly why it was
+  present in the find that prompted the rule and why blaming it looked right. **The shipped rule had a
+  live hole**, of the same species as the one it fixed.
+- **A small sample nearly hid it.** Stacked amplifying modes over solids first measured 0 breaches in
+  155 scenes — the generator rarely makes gradient-free scenes. Forcing paints solid to get 2999
+  scenes found 3 breaches (0.1%). The clean claims were then re-measured at that sample size before
+  being believed: non-amplifying modes stacked over the generator's own scenes hold at Δ≤1 over
+  **3000 scenes, 0 breaches**.
+- **Porter-Duff operators amplify independently of blending.** With composite ops on and every blend
+  mode forced non-amplifying, Δ=2 still appears (1 of 2992). `porterDuff` unpremultiplies through
+  `s[0]/s[3]`, and operators like SrcOut and Xor manufacture near-transparent backdrops — so a 1-LSB
+  premultiplied difference gets divided by an alpha the operator itself drove toward zero. SrcOver's
+  fast path never unpremultiplies at all.
+
+**Result:** `Tol()` is now `any amplifying blend mode || any non-SrcOver composite op`, the gradient
+clause is gone, and `stackedBlend` is renamed `amplifiedBlend` — stacking was never the cause, and the
+name kept the rule pointed at the wrong variable. The loose gate now covers **63.6%** of generated
+scenes, down from the shipped 85% and **below even the pre-Phase-15 69.5%**: the oracle is stricter
+than it has ever been *and* no longer has a hole. `amplifying` and `illConditioned` are disjoint by
+test — both name `dB/dCb>1`, and the difference is whether the derivative is bounded and so whether a
+budget can be fitted at all.
+
+Validated by **531,622 differential executions** against the tightened rule — a stricter gate over more
+of the space than the 436,603 that passed under the loose one.
 
 **Result:** corpus gains 12 `composite-*` entries (all three backdrop regimes: opaque, translucent,
 empty) plus 4 `composite-x-blend-*` crossed entries plus 1 regression — all green, all Δ=0 on Metal.
