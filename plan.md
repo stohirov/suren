@@ -570,20 +570,60 @@ loop-variable capture bug that would silently collapse all 12 blend entries into
 every gate still passed; **verified it fails when the bug is deliberately injected**, since a guard
 that cannot fail is worse than none.
 
-#### 12b — property-based invariants
+#### 12b — property-based invariants  ✅
 
-- [ ] A `internal/parity/props` suite asserting algebraic laws the renderer must obey, checked on
+- [x] A `internal/parity/props` suite asserting algebraic laws the renderer must obey, checked on
       generated scenes (not fixed goldens):
       - **Affine composition:** `render(node∘(A·B)) == render((node∘A)∘B)` within tolerance —
-        transform associativity through the CTM.
+        transform associativity through the CTM. **Δ=0** on both backends.
       - **Idempotent clips:** clipping by the same path twice equals clipping once
-        (`clip(clip(x,C),C) == clip(x,C)`).
+        (`clip(clip(x,C),C) == clip(x,C)`). **Δ=0 — but only pixel-aligned; see the finding below.**
       - **Compositing associativity** (for the associative operators only — SrcOver, and the
         Porter-Duff subset that qualifies after Phase 15): `(A over B) over C == A over (B over C)`.
       - **Premultiply round-trips:** `premul(unpremul(p)) == p` for every representable pixel;
-        guards the un/re-premultiply used by every non-SrcOver blend path.
-- [ ] Each property runs on **both** backends independently (the law must hold within each) **and**
+        guards the un/re-premultiply used by every non-SrcOver blend path. **Δ=0** both backends.
+- [x] Each property runs on **both** backends independently (the law must hold within each) **and**
       cross-backend (both must agree). A property failure prints the generating seed for 12c replay.
+
+**Structure:** a `Law` carries its **own** gate (like a corpus `Entry`) — the tolerance is a property
+of the law, not a global knob. Laws are parameterised by a `RenderFunc`, so the suite lives in the
+root module and the **GPU test passes its own renderer in**; `props` never imports `backend/gpu` and
+the cgo quarantine holds. `CheckAll` runs each law within one backend (52 CPU subtests);
+`CheckAgreement` renders each law's generated scene on both and requires they agree (104 GPU
+subtests) — a law holding independently on each backend does **not** imply the backends agree, so
+that is a separate gate. Every failure prints `seed=0x…`, and the seed *is* the repro for 12c.
+
+**FINDING — clip idempotence is false under antialiasing, by design.** Clip coverages compose by
+**multiplication**, so applying the same path twice squares an edge coverage: 0.5 → 0.25. Measured
+**Δ=52** on an AA circle clip, versus **Δ=0** for a pixel-aligned clip. This is not a rounding
+artifact and not something tolerance should absorb — it is what multiplicative coverage composition
+*means* (Skia/Cairo behave the same). The law is therefore **scoped to pixel-aligned clips**, where
+coverage is binary, and the AA case is recorded here rather than hidden by a widened gate.
+*Open decision for later:* product vs `min` for stacking clip coverage — `min` would make idempotence
+hold under AA, but it is a semantic change touching both backends and is not a test-phase call.
+
+**Two oracle corrections the measurements forced:**
+
+1. **Premultiply round-trip:** the first oracle compared against `col.RGBA()`, which premultiplies in
+   16-bit then truncates, while the renderer rounds in 8-bit — it failed at Δ=1 while the renderer was
+   correct. It was testing **Go's color model**, not the round-trip. The real oracle was already in the
+   tree: **SrcOver is the one path that never unpremultiplies**, so "every general mode over an empty
+   backdrop == SrcOver over an empty backdrop" pins the divide/re-multiply with no external formula.
+   Δ=0.
+2. **Compositing associativity** cannot be exact and measurement says so: the split render quantizes
+   its intermediate composite to 8 bits where the whole render keeps full precision — **14/16 seeds at
+   Δ=1, 2/16 at Δ=2**, so the gate is `Budget(2, "split render quantizes its intermediate composite")`,
+   the measured bound, and the suite's only budget. The **grouped** form `(A over B) over C` is not
+   expressible until **Phase 18** adds isolated layers (a scene admits exactly one grouping today), so
+   what is asserted is the achievable equivalent: rendering is a **pure fold over nodes** with no
+   cross-node state.
+
+**Anti-vacuity, because a property test that draws nothing passes everything:** `nonTrivial` requires
+real coverage and more than one distinct pixel before any law is allowed to assert, and it **caught a
+real case** (a generated scene rendering ~nothing) during bring-up; `randColor` never emits alpha 0
+for the same reason (low alphas are kept — that is where the divide by alpha is worst). Both guards
+were **verified by injection**: removing the pixel-alignment from the clip generator makes
+clip-idempotence fail immediately, so the scoping is load-bearing rather than decorative.
 
 #### 12c — differential fuzzing with automatic shrinking + seed replay + bisect
 
