@@ -403,6 +403,7 @@ dedicated parity scene. (Blend modes ✅; path clips ✅; sRGB remains, gated on
 | A generated scene renders nothing and passes every gate vacuously | Phase 12c: opaque background by construction; `parity.NonTrivial` skips the residue; the skip rate itself is gated at 3% |
 | A fuzz find stops reproducing when the generator changes | Phase 12c: finds are stored as explicit `Spec` JSON, not seeds — a seed's scene shifted the moment two blend modes were excluded |
 | A feature that cannot be made exact forces a tolerance widening on every scene containing it | Phase 14: per-tile CPU fallback confines the remedy to the node's own tiles; corpus keeps the full-frame gate at `Identical()` |
+| A bbox estimate that was merely advisory becomes load-bearing when a new caller uses it to DROP work | Found in review after Phase 15: `cpu.nodeBounds` padded a stroke by `w/2`, but a miter reaches `miterLimit*w/2` (4x by default) — measured 8.9px short. Harmless while `culled()` only dropped fully off-canvas nodes; Phase 14's `tileCulled` drops against a few flagged tiles, so a miter spike escaping into one made the CPU patch overwrite correct GPU pixels (Δ=220, visible corruption). Bound now comes from `path.Stroker.MaxExtent`; `fallback-stroke_test` pins it |
 | A scene built to prove the fallback works is exact on GPU anyway, so the gate measures nothing | Phase 14: nearly shipped exactly this — the first probe was Δ=0 with the fallback off. Fixed by a node that diverges by measurement, and `TestFallbackBuysExactness` now asserts the off/on difference rather than the on result |
 | The fallback becomes the cheap general answer to "it's not exact" | Phase 14: priced at ~6µs/tile and recorded — full-frame fallback is ~14× a GPU frame and worse than the CPU backend. The benchmark reports `%frame` so a feature cannot quietly fall back on everything |
 
@@ -933,6 +934,24 @@ alongside ns/op:
 
 Linear at ~6µs/tile (1280×720, M4, Metal). Zero flagged tiles costs nothing measurable, so the path
 is free for every scene that does not use it.
+
+**Post-review correction (found after Phase 15).** The fallback shipped with a real corruption bug,
+and its shape is worth keeping: `cpu.nodeBounds` padded a stroked node by the stroke's half-width,
+which is **not** an upper bound — a miter join reaches `miterLimit*w/2`, four times that by default.
+The estimate had been wrong since long before Phase 14 and was harmless, because its only caller
+(`culled`) needed a node's whole bbox off-canvas before dropping it. `tileCulled` then reused it to
+drop nodes against a handful of flagged tiles, where being 8.9px short is enough: a miter spike
+reaching a flagged tile that the padded path bbox misses gets culled from the CPU patch, and the patch
+overwrites the GPU's correct pixels with a tile that never drew it. Measured **Δ=220 over 76 channels**
+— corruption, not a rounding delta. The bound now comes from `path.Stroker.MaxExtent`, which owns the
+miter-limit default, and `TestFallbackKeepsMiterSpike` reproduces the old failure exactly. **The
+lesson is the reuse, not the arithmetic:** an approximation is only as safe as its callers' tolerance
+for error, and Phase 14 changed that tolerance without rechecking the approximation.
+
+Also added in review: `TestFallbackWithPorterDuff`, since Phases 14 and 15 never met in a test.
+A fallback tile under a backdrop-reading operator (Clear, DstOut, SrcIn, DstIn, Xor, Src/DstAtop) is
+exact at Δ=0 — the patch recomputes the whole node stack from transparent black rather than
+compositing over the GPU's pixels, so there is no backdrop for the two to disagree about.
 
 **Done when:** a deliberately-inexact feature renders at exact tolerance overall by CPU-filling its
 tiles, with a benchmark showing the fallback tile count and its frame-time cost. ✅ — with the caveat
