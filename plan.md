@@ -820,7 +820,7 @@ rejected.** Every tolerance in the tree is now the quantization floor except one
       | round per node | 0 | **0** | **0** | **0** | **0** | **0** | **0** |
 
       12c's generator caps at four nodes, where the effect is a single LSB — it could never have
-      found this. `sample.BlendStack` + the `blend-stack-srcover`/`blend-stack-overlay` corpus
+      found this. `sample.BlendStack` + the `blend-stack-normal`/`blend-stack-overlay` corpus
       entries gate it at **Δ=0** forever (pixel-aligned solids, so nothing but rounding can move
       them); reverting the shader fails them at Δ=1/Δ=3, verified.
 - [x] **Phase 10's ColorDodge/ColorBurn budgets are deleted.** Both now hold at `Quantized()` — the
@@ -947,23 +947,97 @@ the assumption that it is cheap.
 
 Ordered by independence. Each cites Section A for its gate. None is "done" GPU-only.
 
-### Phase 15 — full Porter-Duff compositing operators  ⏳ planned
+### Phase 15 — full Porter-Duff compositing operators  ✅
 
 Blend modes (Phase 10) answer "how do source and backdrop *colors* combine." Porter-Duff answers
-"how do their *coverages* combine" — a different axis. Today only `SrcOver` exists.
+"how do their *coverages* combine" — a different axis. Before this phase only `SrcOver` existed.
 
-- [ ] Add the 12 PD operators (Clear, Src, Dst, SrcOver, DstOver, SrcIn, DstIn, SrcOut, DstOut,
-      SrcAtop, DstAtop, Xor) as a `paint.CompositeOp` enum, orthogonal to `paint.BlendMode`
-      (per W3C `mix-blend-mode` × `composite`). Node carries both; `Node.Flags` packing extends
-      (or a second field — `Node.Flags` is currently full with `Op`).
-- [ ] CPU: generalize `raster/fill.go` `blend()` to the PD `Fa,Fb` coverage-coefficient form
-      `Co = Fa·αs·Cs + Fb·αb·Cb`. GPU: same coefficients in `raster.wgsl` `composite()`. SrcOver
-      stays the fast premultiplied path on both.
-- [ ] Corpus entries per operator over opaque/translucent/empty backdrop regions (like BlendScene);
-      the associativity property (12b) applies to the associative operators only.
+**All 12 land at Δ=0 on Metal, gated at the floor. The phase's real content is two things the plan
+did not anticipate: what antialiasing coverage *means* once the operator is not source-over, and a
+pre-existing tolerance bug the widened fuzzer surfaced.**
+
+- [x] **The two axes, named apart.** `paint.CompositeOp` (12 operators) alongside `paint.BlendMode`,
+      per W3C `mix-blend-mode` × `composite`. `scene.Node` carries both; `Canvas.SetComposite` is the
+      opt-in. `Node.Flags` packs blend in bits 0-3 and the operator in bits 4-7 (`packFlags`), which
+      keeps the hand-mirrored GPU `Node` at its current size rather than inserting a field into two
+      structs for two bits.
+- [x] **`BlendMode.SrcOver` was renamed to `Normal`, which is what it always was.** The plan listed
+      `SrcOver` among the 12 operators while `paint.SrcOver` already existed as a *blend mode* — the
+      old name conflated the two axes at exactly the point they had to come apart. W3C calls that
+      blend function `normal`; the enum's zero value never was a Porter-Duff operator. The compiler
+      caught all 16 sites, no pixel moved, and corpus `blend-srcover` → `blend-normal`,
+      `blend-stack-srcover` → `blend-stack-normal` (Phase 13's text above updated to match).
+- [x] **Coverage is not source alpha — the one real trap.** `blend()` folds coverage into αs, which
+      is *correct for SrcOver* and nonsense for anything else: a half-covered `Clear` has αs·cov = 0
+      either way and (Fa,Fb)=(0,0) would erase the whole pixel instead of half of it. The general
+      form composites at full source strength and then lerps between that and the untouched backdrop
+      by coverage — `result = cov·PD(s,b) + (1-cov)·b` — which reduces to exactly the αs-scaling for
+      SrcOver, which is *why* the fast path was never wrong. `TestPorterDuffCoverageIsNotSourceAlpha`
+      pins it; mutating the code to fold coverage in produces the predicted all-zero pixel.
+- [x] **SrcOver keeps its old arithmetic on both backends, deliberately.** `porterDuff` is
+      algebraically identical for it — proven by `TestPorterDuffGeneralizesSrcOver` over
+      backdrop×source×coverage×mode — but not identical float-for-float, so routing SrcOver through
+      the general form would move every AA edge in the tree by an LSB and churn every golden to buy
+      nothing. Neither form is more correct. The fast path also skips an unpremultiply.
+- [x] **The coefficient table has an independent witness.** `raster.Coefficients` and `raster.wgsl`'s
+      `pdCoeff` state the same 12 rows. An alpha check against `αs·Fa + αb·Fb` would restate the
+      table rather than test it, so `alphaOracle` derives each operator's output alpha from
+      Porter-Duff's *coverage geometry* (αs and αb as areas of two independent subsets; each operator
+      names which parts of the Venn diagram survive). Plus `DstOver(s,b) == SrcOver(b,s)` and a
+      color-source test separating the pairs alpha cannot distinguish (SrcIn/DstIn have identical
+      αo and opposite colors). Mutations tried: transposed SrcIn row → caught; SrcAtop/DstAtop
+      swapped → caught.
+- [x] **The axes are tested crossed, and the reason is measured.** Every `composite-*` entry left
+      blend at Normal and every `blend-*` entry left composite at SrcOver, so neither family could see
+      the two being confused — and they share one packed word. Widening the shader's blend mask from
+      `0xF` to `0xFF` lets the operator bits leak into the mode and **every single-axis entry still
+      passes**: with one axis at its zero value the leaked bits land past the end of `blendCh`'s
+      switch, whose default returns the source color, which is what Normal does. The four
+      `composite-x-blend-*` entries are the complete set that goes red.
+- [x] **Associativity: two of the twelve qualify, and the other ten are recorded, not skipped.** The
+      law needs the operator to be associative *and* transparent black to be its identity. SrcOver and
+      DstOver pass both — DstOver's fold reverses paint order, so it recombines as `over(P,S)` rather
+      than `over(S,P)`, a nontrivial second witness reusing the same helper. Six fail the identity
+      condition (their coefficients collapse against a transparent backdrop, so the fold renders
+      nothing); Clear/Dst/Src hold it vacuously. **Xor is the near-miss worth naming:** T *is* its
+      identity and its alpha *is* associative (a+b−2ab is symmetric in three arguments), but its color
+      is not — cx's coefficient is (1−ay)(1−az) one grouping and 1−ay−az+2ay·az the other, equal only
+      when ay·az=0. Alpha associativity is not associativity.
+- [x] **The generator now draws composite ops, and the bias is load-bearing.** Sampling the nine
+      non-degenerate operators uniformly took the trivial-scene rate from 0.8% to **4.0%**, past 12c's
+      3% vacuity gate — not a bug: `SrcOut` over an opaque backdrop is *defined* to erase, so a large
+      node wipes the frame and the differential has nothing to compare. Raising the gate would have
+      inverted its purpose. A node keeps SrcOver at 8/10 instead (1.8% measured, ~40% of the gate in
+      hand). Clear/Src/Dst are excluded from generation — each ignores an operand, so there is little
+      interaction to lose — and each keeps a corpus entry where its effect is the point.
+
+**The fuzz find, and what it says about this apparatus.** Widening the generator found a divergence in
+90 seconds: seed `0xb50`, shrunk to three nodes — opaque background, radial-gradient rect, and **one**
+SoftLight rect — diverging at Δ=2 against a Δ≤1 gate, one channel of 36864. It contains **no
+Porter-Duff operator at all**. `Spec.Tol()` gave the stacking budget only to scenes with *two* general
+blend nodes, while the budget's own stated reason already named "the 1 LSB that f32-vs-f64 coverage and
+**gradient** evaluation leave" — so the rule contradicted the budget it was selecting, and "one general
+mode is exact" was asserted rather than measured. A gradient leaves that LSB just as a prior blend node
+does. Fixed: `general >= 2 || (general >= 1 && gradient)`.
+
+This was **verified pre-existing, not argued**: the minimized scene was replayed against the previous
+commit's tree and reproduces Δ=2 at the same pixel (39,53) with no Porter-Duff in the tree. Phase 15
+surfaced it only because adding one draw to the generator reshuffled every seed's scene — which is the
+lesson worth keeping: **the seeds are not a fixed test set, and any generator change re-rolls all of
+them.** That is an argument for storing finds as specs (12c already does) and against ever reading a
+green fuzz run as coverage of a fixed space. Recorded as `regress/fuzz-softlight-over-gradient.json`.
+
+With the rule corrected, **436,603 differential executions** over the widened space (composite ops
+generated) found nothing further.
+
+**Result:** corpus gains 12 `composite-*` entries (all three backdrop regimes: opaque, translucent,
+empty) plus 4 `composite-x-blend-*` crossed entries plus 1 regression — all green, all Δ=0 on Metal.
+They are gated `Quantized` and not `Identical` on purpose: Δ=0 here is a fact about these colors on
+this driver, not a property, since `porterDuff` unpremultiplies through a division and lerps by
+coverage in f32 against the reference's f64. Gating on it would read luck as a guarantee.
 
 **Done when:** all 12 operators pass exact parity (Δ≤1) per corpus entry; associativity invariant
-green for the qualifying subset.
+green for the qualifying subset. ✅
 
 ### Phase 16 — conic + mesh gradients  ⏳ planned
 
