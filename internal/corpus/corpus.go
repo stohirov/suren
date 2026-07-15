@@ -63,5 +63,13 @@ func All() []Entry {
 			Tol:   b.tol,
 		})
 	}
-	return entries
+	// Regressions are embedded at compile time, so a decode failure is a defect
+	// in the tree rather than a runtime condition a caller could handle. It
+	// panics rather than dropping the entry, because a fuzz find that silently
+	// stops being checked is the exact failure this directory exists to prevent.
+	regs, err := Regressions()
+	if err != nil {
+		panic("corpus: loading fuzz regressions: " + err.Error())
+	}
+	return append(entries, regs...)
 }

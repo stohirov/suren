@@ -1,7 +1,6 @@
 package props
 
 import (
-	"image"
 	"math"
 	"math/rand/v2"
 
@@ -84,23 +83,4 @@ func randAlignedRect(rng *rand.Rand) geom.Rect {
 	w := float64(10 + rng.IntN(W/2))
 	h := float64(10 + rng.IntN(H/2))
 	return geom.RectXYWH(x, y, w, h)
-}
-
-// nonTrivial guards against a law passing because nothing was drawn: the image
-// must have real coverage and more than one distinct pixel.
-func nonTrivial(img *image.RGBA) bool {
-	if len(img.Pix) < 4 {
-		return false
-	}
-	covered, distinct := 0, false
-	first := [4]uint8{img.Pix[0], img.Pix[1], img.Pix[2], img.Pix[3]}
-	for i := 0; i < len(img.Pix); i += 4 {
-		if img.Pix[i+3] > 0 {
-			covered++
-		}
-		if [4]uint8{img.Pix[i], img.Pix[i+1], img.Pix[i+2], img.Pix[i+3]} != first {
-			distinct = true
-		}
-	}
-	return distinct && covered*100 > len(img.Pix)/4
 }

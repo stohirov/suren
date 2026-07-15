@@ -66,7 +66,7 @@ func check(t testing.TB, law string, seed uint64, got, want *image.RGBA, cfg par
 
 func requireNonTrivial(t testing.TB, law string, seed uint64, img *image.RGBA) {
 	t.Helper()
-	if !nonTrivial(img) {
+	if !parity.NonTrivial(img) {
 		t.Fatalf("law %s [seed=0x%x]: generated scene renders (almost) nothing; the law would pass vacuously", law, seed)
 	}
 }

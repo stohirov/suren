@@ -10,7 +10,9 @@ import (
 	"github.com/stohirov/sukho/scene"
 )
 
-func gpuRenderFunc(t *testing.T) props.RenderFunc {
+// t is a testing.TB so the differential fuzz target (which holds a *testing.F)
+// can build a renderer once and reuse it across iterations.
+func gpuRenderFunc(t testing.TB) props.RenderFunc {
 	t.Helper()
 	r, err := NewRenderer(props.W, props.H)
 	if err != nil {
