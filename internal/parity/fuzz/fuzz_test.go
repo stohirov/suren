@@ -167,6 +167,54 @@ func TestEarnedGatesNameTheirReason(t *testing.T) {
 // sample size (Δ=3 at 3k seeds, Δ=5 at 25k) while every other mode stays flat at
 // Δ=2. This is a scope decision, and a scope decision that only lives in a
 // comment is one edit from being undone silently.
+// The composite axis's counterpart to the ill-conditioned check below: it holds
+// gen.go to what it claims to generate, in both directions.
+//
+// randComposite keeps SrcOver 8 times in 10, and that bias is the danger. If it
+// regressed to always returning SrcOver, every Porter-Duff operator would quietly
+// leave the generated space — the fuzzer would still run, still pass, and still
+// report hundreds of thousands of clean executions while testing none of Phase
+// 15. Nothing else in the tree would notice, because a scene that composites
+// SrcOver is a perfectly valid scene.
+//
+// The exclusions are pinned for the same reason: Clear, Src and Dst are left out
+// deliberately (each ignores an operand, and the first two erase the frame past
+// the vacuity gate), so a later change that starts emitting them should have to
+// say so here rather than silently push the trivial-scene rate up.
+func TestGeneratorEmitsEveryCompositeOp(t *testing.T) {
+	excluded := map[paint.CompositeOp]string{
+		paint.Clear: "Clear", paint.Src: "Src", paint.Dst: "Dst",
+	}
+	seen := map[paint.CompositeOp]int{}
+	const seeds = 2000
+	for i := range seeds {
+		for _, n := range Generate(uint64(i) + 1).Nodes {
+			seen[n.Composite]++
+			if name, bad := excluded[n.Composite]; bad {
+				t.Fatalf("seed=0x%x emitted %s, which gen.go excludes on purpose", i+1, name)
+			}
+		}
+	}
+	for _, op := range compositeOps {
+		if seen[op] == 0 {
+			t.Errorf("composite op %d never generated over %d seeds; it is in compositeOps but unreachable", op, seeds)
+		}
+	}
+	if n := len(compositeOps); n != 9 {
+		t.Errorf("compositeOps has %d entries, want 9 (twelve operators minus Clear, Src and Dst)", n)
+	}
+	// The bias must leave SrcOver dominant but not total: at neither extreme is
+	// the generator doing what randComposite documents.
+	total := 0
+	for _, c := range seen {
+		total += c
+	}
+	frac := float64(seen[paint.SrcOver]) / float64(total)
+	if frac < 0.5 || frac > 0.95 {
+		t.Errorf("SrcOver is %.1f%% of generated nodes; randComposite documents a ~80%% bias", frac*100)
+	}
+}
+
 func TestGeneratorOmitsIllConditionedBlendModes(t *testing.T) {
 	for op := range illConditioned {
 		for _, m := range blendModes {
