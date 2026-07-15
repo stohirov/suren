@@ -366,7 +366,9 @@ dedicated parity scene. (Blend modes ✅; path clips ✅; sRGB remains, gated on
 - **GPU/CPU parity** is the primary correctness gate: same scene both renderers, raw
   premultiplied RGBA diff within tolerance (solid, many-nodes, clip, gradient today; add a
   pathological many-segment scene in Phase 8, per-mode blend and path-clip scenes in
-  Phase 10).
+  Phase 10). Since Phase 12 the scenes are a **named corpus** (`internal/corpus`, each entry
+  carrying the tolerance it earned) plus **generated** scenes — property laws (12b) and a
+  differential fuzzer (12c) whose finds land back in the corpus as `regress/*.json`.
 - **Encoder unit tests** (pure Go, no GPU): node/segment/stop counts, kinds, bbox,
   clip flags, tile-bin structure; extend to per-tile segment ranges + backdrops in Phase 8.
 - **Headless GPU roundtrip** (`TestDeviceInit`, offscreen render + readback) so the
@@ -390,10 +392,16 @@ dedicated parity scene. (Blend modes ✅; path clips ✅; sRGB remains, gated on
 | glfw drags a display dep into headless builds/CI | quarantine behind `//go:build gpupresent`; default build and test binary never link it |
 | Window resize invalidates fixed-size target | `target.resize` (6a) reallocates texture/readback/dims; surface reconfigured on resize (6b) |
 | Static-scene fingerprint costs more than it saves | Phase 7c: measure hash cost vs upload+dispatch; keep only if net win |
+| Ill-conditioned ops (dodge/burn) make the differential oracle meaningless | Phase 12c: measured Δ=18 with both backends correct; excluded from the generator, still gated exactly by the corpus where inputs are bit-identical |
+| A generated scene renders nothing and passes every gate vacuously | Phase 12c: opaque background by construction; `parity.NonTrivial` skips the residue; the skip rate itself is gated at 3% |
+| A fuzz find stops reproducing when the generator changes | Phase 12c: finds are stored as explicit `Spec` JSON, not seeds — a seed's scene shifted the moment two blend modes were excluded |
 
 ## Critical files
 
 - `render/render.go` — `Renderer` interface, the CPU/GPU seam
+- `internal/parity/contract.go` — the tolerance contract every gate in the tree cites
+- `internal/corpus/corpus.go` — the named scene corpus (+ `regress/` for fuzz finds)
+- `internal/parity/fuzz/` — scene generator, shrinker, bisect (Phase 12c)
 - `backend/cpu/cpu.go` + `raster/fill.go` — CPU reference the GPU must match
 - `backend/gpu/encode.go` — scene → GPU buffers + tile bins (Phase 7 `EncodeInto`, Phase 8 coarse lists)
 - `backend/gpu/raster.wgsl` — the fine rasterizer (Phase 8 per-tile lists, Phase 10 blend/clip)
@@ -509,7 +517,7 @@ exactly Phase 13's job.
 blend value, and `tol` in `path`/`raster` flattening tests is a geometry tolerance — neither is a
 cross-backend parity gate, so both correctly stay outside the contract.
 
-### Phase 12 — the differential test machine  ⏳ planned
+### Phase 12 — the differential test machine  ⏳ in progress (12a ✅, 12b ✅, 12c ✅, 12d gated on 13)
 
 Four capabilities on one shared corpus + generator. Order is cheapest-first; each is independently
 useful.
@@ -625,22 +633,90 @@ for the same reason (low alphas are kept — that is where the divide by alpha i
 were **verified by injection**: removing the pixel-alignment from the clip generator makes
 clip-idempotence fail immediately, so the scoping is load-bearing rather than decorative.
 
-#### 12c — differential fuzzing with automatic shrinking + seed replay + bisect
+#### 12c — differential fuzzing with automatic shrinking + seed replay + bisect  ✅
 
-- [ ] A scene generator seeded by a single `uint64` (deterministic; the seed *is* the repro).
+- [x] A scene generator seeded by a single `uint64` (deterministic; the seed *is* the repro).
       Emits random-but-valid scenes: N nodes, random paths/transforms/paints/clips/blend ops drawn
-      from the currently-implemented feature set. Go's native fuzzing (`raster/fuzz_test.go` already
-      exists as a single-backend precedent) drives it; the differential oracle is CPU-vs-GPU exact
-      delta.
-- [ ] **Automatic shrinking:** on a failing seed, minimize by construction — bisect the node list
-      (drop-half, keep the failing half), then per-node strip transform/clip/stroke/gradient down to
-      the smallest scene that still diverges. Report the minimized scene + its delta heat location.
-- [ ] **Bisect mode:** given a failing multi-node scene, binary-search to the **first diverging
-      primitive** — the single node (and pixel span) where CPU and GPU first disagree — so a
-      divergence is attributed to one feature, not "somewhere in a 200-node scene."
-- [ ] **Seed replay:** `go test -run Fuzz -seed=0x...` re-materializes the exact scene headlessly;
-      the minimized scene is also emitted as a corpus entry (12a) so every fuzz find becomes a
-      permanent regression golden.
+      from the currently-implemented feature set. Go's native fuzzing drives it (`FuzzDifferential`);
+      the differential oracle is CPU-vs-GPU exact delta. `TestFuzzSweep` runs 64 fixed seeds on every
+      `go test`, so the differential is a **standing gate**, not something that only runs when someone
+      remembers to pass `-fuzz`.
+- [x] **Automatic shrinking:** delta debugging over the node list (drop a chunk, keep the failure,
+      halve on failure), then per-node stripping of clips/stroke/dashes/gradient/shape→bbox/
+      transform/blend/fill-rule, to a fixpoint. The gate is computed **once from the original scene
+      and held fixed**: recomputing it per candidate would let the shrinker re-gate its way to a
+      "failure" the original never had. Fixed-gate shrinking can only under-report.
+- [x] **Bisect mode:** `FirstDiverging` attributes the divergence to one node. It is a **linear scan,
+      deliberately, where the plan said binary search** — prefix divergence is *not monotone*: a later
+      opaque node can paint over the pixels where an earlier one diverged, so a clean prefix at k says
+      nothing about k-1, and a binary search would name a node that merely sits on a monotone
+      boundary. It runs on the *shrunk* scene, so correctness costs a few renders.
+      `TestFirstDivergingFindsTheEarliestOfSeveral` pins exactly the case a binary search gets wrong.
+- [x] **Seed replay:** `go test ./backend/gpu -run TestFuzzReplay -seed=0x...` re-materializes a seed
+      headlessly; `-emit` writes the minimized scene to `internal/corpus/regress/*.json`, which
+      `corpus.All()` loads as ordinary entries (cross-backend gate + CPU golden).
+- [x] **A find is stored as a `Spec`, not a seed.** A seed only reproduces while the generator is
+      untouched, so the first edit to `gen.go` would silently retire every past find — and this
+      happened *within this phase*: excluding two blend modes shifted every seed's scene. The `Spec`
+      is explicit data, JSON round-tripping **bit-exactly** (verified on the render, not just the
+      struct, since regressions are gated at Δ=0).
+
+**Result:** ~1M fuzz executions plus a 3000-seed sweep, no unexplained divergence. The machine found
+two real things, and both changed the contract rather than the code.
+
+**FINDING 1 — ColorDodge/ColorBurn are ill-conditioned, so the differential oracle does not apply to
+them.** Their blend derivatives are `1/(1-cs)` and `1/cs`, *unbounded*, so they multiply any input
+difference without bound. Measured on the fuzzer's own find (seed `0x737`), isolated by construction:
+
+| scene | Δ |
+|---|---|
+| gradient + ColorDodge over a *blended* backdrop | **17** |
+| same gradient, SrcOver instead | 1 |
+| **solid** + ColorDodge over the same blended backdrop | **18** |
+| gradient + ColorDodge over a *plain* backdrop | 1 |
+
+Both backends are individually correct in every row. The dodge node amplifies whatever sub-LSB
+difference reaches it — a 1-LSB backdrop left by a previous blend, *or* a gradient's source colour
+whose f32-vs-f64 parameter differs by well under one LSB (invisible at Δ≤1 under SrcOver, multiplied
+≈54× via `dB/dcs = cb/(1-cs)²`). There is no bug to find and no bound to gate at, so the generator
+**omits them**, with the measurement recorded. They stay covered exactly where the oracle *does*
+apply — the corpus feeds them bit-identical inputs (solid over a plain backdrop) at Δ≤2/Δ≤3 — and
+`Spec.Tol` still gates them correctly if a stored spec contains one, because `Tol` is a function of
+the scene, not of the generator. **This also reframes Phase 10's dodge/burn budgets: they hold
+because `BlendScene` feeds them pinned inputs, not because the divergence is bounded at 2–3.**
+
+**FINDING 2 — the Δ≤1 floor does not compose across stacked blends, but it is worth exactly one more
+bit.** Both backends composite through an 8-bit intermediate, so a second blend node reads a backdrop
+already quantized (and already possibly 1 LSB apart). A blend's sensitivity to it is
+`d(Co)/d(Cb) = αs·B'(cb) + (1-αs)` — **the backdrop alpha cancels** — so a mode with `B'>1` (Overlay
+at `2(1-cs)`) amplifies rather than absorbs. Measured over 3000 seeds, by number of general
+(non-SrcOver) blend nodes:
+
+| general nodes | 0 | 1 | 2 | 3 | 4 |
+|---|---|---|---|---|---|
+| max Δ | 1 | 1 | **2** | **2** | **2** |
+| max alpha Δ | 0 | 0 | 0 | 0 | 0 |
+
+**Flat, not compounding** — which is what made this a `Budget(2)` in exact mode rather than a retreat
+to perceptual mode. (The first measurement said Δ=6 and looked unbounded; that was entirely
+dodge/burn contamination, and re-measuring after Finding 1 collapsed it.) Alpha never diverged at any
+depth and cannot: `αo = αs + αb(1-αs)` has gain `(1-αs) ≤ 1`. **Phase 13 is the fix, not a wider
+tolerance:** if pinning the rounding rules drives the per-composite delta to 0, there is nothing left
+to amplify and these scenes should collapse back to the floor — a testable prediction, and
+`stackedBlend` is where it will be observed.
+
+**The generator's guarantee is checked, not asserted.** Every scene opens with an opaque background
+(without which blend modes collapse to the premultiply round-trip and clipped nodes bite on nothing),
+but 0.8% of seeds still render uniformly — a node can be invisible by *correct* blending (Darken with
+a source lighter than an opaque backdrop returns the backdrop exactly, for any alpha). Those seeds are
+**skipped, not failed**, and the skip rate is itself gated at 3% so vacuity can never quietly eat the
+suite. `parity.NonTrivial` moved out of `props` to sit with the contract, since any harness rendering
+a scene it did not hand-write needs it.
+
+**Every failure-path component is tested by injection**, because the renderers agree today and a
+minimizer that quietly does nothing still reports "minimized": a fake divergence with a known culprit
+proves the shrinker reaches one node, strips every feature that does not matter, keeps the one that
+does, and never modifies a passing spec.
 
 #### 12d — cross-platform golden reconciliation (gated on-device)
 
@@ -682,6 +758,14 @@ for the cases where it can't.
 - [ ] **Rounding:** confirm both sides use round-half-away-from-zero (or the same rule) at the final
       `*255+0.5` quantization; this is the source of the Δ≤1 floor and it must be *the same* Δ≤1,
       not two different roundings that happen to be close.
+- [ ] **12c handed this phase a measurable success criterion**, not just a task: stacked blend nodes
+      currently earn `Budget(2)` purely because each composite re-quantizes to 8 bits and the next
+      blend amplifies the 1-LSB difference. If pinning the rounding drives the per-composite delta to
+      0, `fuzz.stackedBlend` should collapse to the floor and the budget can be **deleted** — the
+      first tolerance in this tree ever retired by a fix rather than widened. If it does not, the
+      residual is a real per-op divergence that 12c's minimizer can attribute to one node.
+      12c also showed the *sub*-LSB divergence this phase must chase is real and already measurable:
+      a gradient's f32-vs-f64 parameter, invisible at Δ≤1, was amplified ≈54× by ColorDodge.
 
 **Done when:** 12d's cross-backend delta on the corpus is ≤ the quantization floor (Δ≤1) with every
 residual Δ≥2 site named and justified, matching Phase 11's tolerance discipline.
