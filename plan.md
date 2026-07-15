@@ -374,6 +374,9 @@ dedicated parity scene. (Blend modes ✅; path clips ✅; sRGB remains, gated on
 - **Headless GPU roundtrip** (`TestDeviceInit`, offscreen render + readback) so the
   full pipeline is exercised without a display. Stays the CI gate — windowed present (6b)
   is validated manually on-device only.
+- **Per-backend reconciliation** (`TestReconcileBackends`, Phase 12d) runs the corpus on each
+  native backend the host exposes and reports the ones it could not. On Apple silicon that is
+  Metal alone, so a green `go test` proves Metal parity and explicitly disclaims the rest.
 - **Benchmarks** — `-benchmem` guards Phase 7 (allocs/op → ~0; steady-state frame time);
   a dedicated many-segment benchmark guards Phase 8; encode-heavy scenes gate Phase 9.
 
@@ -395,6 +398,8 @@ dedicated parity scene. (Blend modes ✅; path clips ✅; sRGB remains, gated on
 | Ill-conditioned ops (dodge/burn) make the differential oracle meaningless | Phase 12c: measured with both backends correct; excluded from the generator, still gated by the corpus where inputs are bit-identical — at the plain floor since Phase 13 |
 | GPU accumulates a tile in f32 while the CPU re-quantizes per node | Phase 13: shader rounds per node (`quant8`); `blend-stack-*` corpus entries gate it at Δ=0 at 64 layers, where a regression shows as Δ=10 |
 | Go fuses FMA on some architectures, making CPU goldens arch-dependent | Phase 13: measured — fusion happens on arm64 but is unobservable at 8 bits (f64 has ~13 orders of headroom); all 21 goldens reproduce bit-for-bit pinned or not |
+| A backend-selection API that is silently ignored reports parity for a backend that never ran | Phase 12d: `RequestAdapterOptions.BackendType` does exactly this — use the instance mask, and verify the adapter's own reported backend |
+| "GPU parity" quietly means "parity on one laptop" | Phase 12d: reconciliation runs per named backend and **logs which ones it did not cover**; the claim is auditable from the test output |
 | A generated scene renders nothing and passes every gate vacuously | Phase 12c: opaque background by construction; `parity.NonTrivial` skips the residue; the skip rate itself is gated at 3% |
 | A fuzz find stops reproducing when the generator changes | Phase 12c: finds are stored as explicit `Spec` JSON, not seeds — a seed's scene shifted the moment two blend modes were excluded |
 
@@ -440,7 +445,7 @@ Section A (correctness machine)
   12a golden corpus + perceptual ΔE/SSIM ─┐
   12b property invariants ────────────────┼─ all consume 11's tolerance definition
   12c differential fuzz + shrink + bisect ─┘   and the shared sample corpus
-  12d cross-platform reconciliation ── needs 13 (determinism) + on-device Vulkan/DX12
+  12d cross-platform reconciliation ✅ harness ── needs a non-Apple runner for coverage
 
 Section B (make exactness reachable)
   13 float determinism controls ✅ ── rounding pinned; what it could not control (FMA
@@ -520,7 +525,7 @@ exactly Phase 13's job.
 blend value, and `tol` in `path`/`raster` flattening tests is a geometry tolerance — neither is a
 cross-backend parity gate, so both correctly stay outside the contract.
 
-### Phase 12 — the differential test machine  ⏳ in progress (12a ✅, 12b ✅, 12c ✅; 12d needs on-device Vulkan/DX12)
+### Phase 12 — the differential test machine  ✅ (12a–12d; 12d's coverage awaits non-Apple hardware)
 
 Four capabilities on one shared corpus + generator. Order is cheapest-first; each is independently
 useful.
@@ -728,27 +733,57 @@ minimizer that quietly does nothing still reports "minimized": a fake divergence
 proves the shrinker reaches one node, strips every feature that does not matter, keeps the one that
 does, and never modifies a passing spec.
 
-#### 12d — cross-platform golden reconciliation (gated on-device)
+#### 12d — cross-platform reconciliation  ✅ harness; ⏳ coverage needs non-Apple hardware
 
-- [ ] The parity claim is currently **Metal-only**. Vulkan and DX12 must produce the *same* GPU
-      output (or the same within a stated tolerance) — otherwise "GPU parity" means "parity on my
-      laptop." Add a reconciliation harness that stores per-corpus golden RGBA and diffs each
-      backend's output against it.
-- [ ] **Hard dependency on Phase 13 — now satisfied on the controllable half.** The rounding rule is
-      pinned in the shader rather than left to each driver's `rgba8unorm` conversion, which is what
-      makes cross-driver reconciliation askable at all. What 13 could *not* control is FMA
-      contraction: it is implementation-defined, WGSL offers no way to forbid it, and f32 has the
-      headroom to show it (unlike the CPU's f64 — see `contract.go`). So if Vulkan or DX12 diverge
-      past the floor, contraction in the coverage sweep, the gradient parameter, or the blend
-      recompose is the first suspect, and the tile-backdrop summation order (documented at
-      `routeCol`) is the second.
-- [ ] Runs on-device / in CI matrix only (sandbox is Metal-headless). Structure it so a missing
-      backend **skips**, never fails — same discipline as the windowed-present tests.
+- [x] **Backend selection, by name and honest about it.** `gpu.Backend` (`Any`/`Metal`/`Vulkan`/
+      `DX12`), `NewDeviceOn`/`NewRendererOn`, `Device.Describe()`. `TestReconcileBackends` runs the
+      whole corpus on every backend the host exposes, at each entry's earned tolerance; an absent
+      backend **skips**, never fails.
+- [x] **A trap worth recording: `RequestAdapterOptions.BackendType` does not work.** The obvious way
+      to pick a backend is accepted, warned about (`unsupported, use WGPUInstanceExtras.backends`),
+      and **silently ignored** — asking for Vulkan on this Metal-only host returns the *Metal*
+      adapter. A harness built on it would have printed `vulkan: PASS` having tested Metal, which is
+      worse than no harness at all. The instance-level mask (`InstanceDescriptor{Backends:…}`) does
+      filter: absent backends fail to yield an adapter. `NewDeviceOn` additionally verifies the
+      adapter's own reported `BackendType` matches the request — defence in depth against a library
+      that has already answered a different question than the one it was asked.
+- [x] **A green run states its own scope.** The test logs `reconciled 1 backend(s): [metal]` and
+      `NOT reconciled here: [vulkan dx12] — the portability claim covers [metal] only`. Verified to
+      fail on an injected divergence, so it is a gate and not a formality.
+
+**Decision: no stored GPU goldens, and the plan's own instrument was the wrong one.** Three reasons,
+the second of which only existed once Phase 13 landed:
+
+- It invents a **second oracle with no authority**. If Metal records 128 and Vulkan says 129 while
+  the true value is 128.5, both are correct; failing Vulkan against Metal's recording asserts
+  "reproduce Metal's rounding rather than the true value" — the exact trade Phase 11 rejects.
+- The **CPU reference is already machine-independent**, and that is measured, not assumed: Phase 13
+  showed Go fuses FMA on arm64 yet every golden reproduces bit-for-bit, because f64 sits ~13 orders
+  of magnitude from the 8-bit rounding decision. Gating each backend against the CPU *on its own
+  host* therefore composes across hosts with no shared file and no canonical GPU.
+- It would be **weaker than what is already gated**: a GPU golden could only be held at the
+  quantization floor, while many-nodes, clip-rect and both blend-stack entries are gated at **Δ=0**
+  against the CPU reference today.
+
+A direct backend-vs-backend gate is no better: if both pass their CPU gate at tolerance T they are
+within 2T of each other automatically (asserting 2T is a tautology), and asserting T would claim two
+independent f32 drivers must agree more tightly than either agrees with the reference, which nothing
+supports. So the CPU reference stays the only oracle and this harness's job is to make sure every
+backend faces it.
+
+**Honest status:** the harness is done and green; the *coverage* is still Metal-only, because this
+host exposes exactly one adapter (`metal/integrated-gpu Apple M4`; Vulkan/DX12/GL enumerate zero).
+Nothing here proves Vulkan or DX12 parity — it proves they have never been run, and says so out loud
+instead of passing quietly. Closing that needs a non-Apple runner. When one exists, the first
+suspects for a divergence past the floor are Phase 13's two named unknowns: FMA contraction (WGSL
+cannot forbid it; f32 has the headroom to show it) and the tile-backdrop summation order at
+`routeCol`.
 
 **Done when:** a single `go test ./internal/parity/...` runs corpus goldens (exact + perceptual),
 all four invariants on generated scenes, and a fuzz pass that on failure prints a minimized,
 replayable, first-diverging-primitive report; cross-platform reconciliation is green on whatever
-backends the runner exposes.
+backends the runner exposes. ✅ — with the standing caveat that "whatever the runner exposes" is
+Metal alone on Apple silicon, which the harness reports rather than glosses.
 
 ---
 
