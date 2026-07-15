@@ -401,3 +401,393 @@ dedicated parity scene. (Blend modes ✅; path clips ✅; sRGB remains, gated on
 - `backend/gpu/target.go` — offscreen texture + readback (Phase 6a `resize`)
 - `backend/gpu/present.go` — glfw surface + blit present (Phase 6b, new; `gpupresent` build tag)
 - `backend/window/window.go` — window loop; gains a GPU-backed variant (Phase 6a)
+
+---
+
+# Part II — correctness-hardening & feature-completeness roadmap
+
+Part I got the GPU renderer to *parity on the scenes we hand-wrote*. Part II makes parity a
+**machine-proven property over a large input space**, then spends that safety net on the
+remaining rendering features. The order is deliberate: build the correctness machine first
+(Section A), make cross-backend determinism achievable (Section B), then land features
+(Section C) each gated by the new machine, and instrument throughout (Section D). Section E
+records the two scope decisions that bound everything else.
+
+**What is already done (do not re-plan):** fill rules (NonZero + EvenOdd, `raster/raster.go`
+`coverage()`, GPU `encode.go:98`), the W3C separable blend set (Phase 10), linear/radial
+gradients (Phase 5), rect + arbitrary-path + nested clips (Phase 10), and the tile-based
+compute pipeline (2D-tiling rewrite + Phase 8). Those appear below only as the baseline the
+new work extends.
+
+**Cross-cutting principle (unchanged from Part I):** every feature lands on **both** CPU and
+GPU with a parity test in the same commit. GPU-only or CPU-only is never "done".
+
+**Dependency sketch (Part II):**
+
+```
+Section A (correctness machine)
+  11 contracts (tolerance + AA + scope) ── pure spec, gates every "Done when" below
+  12a golden corpus + perceptual ΔE/SSIM ─┐
+  12b property invariants ────────────────┼─ all consume 11's tolerance definition
+  12c differential fuzz + shrink + bisect ─┘   and the shared sample corpus
+  12d cross-platform reconciliation ── needs 13 (determinism) + on-device Vulkan/DX12
+
+Section B (make exactness reachable)
+  13 float determinism controls ── gates 12d and any "must agree bit-for-bit" claim
+  14 per-tile CPU fallback ── the escape hatch when 13 can't make a feature exact
+
+Section C (features — each uses A as its gate, B where exactness is at risk)
+  15 Porter-Duff operators ─┐
+  16 conic + mesh gradients ─┤ independent of each other; all touch cpu + gpu + wgsl
+  17 patterns + image sampling ┤ 17 needs 11's AA/filter contract
+  18 group opacity + masks ──┘ 18 needs an offscreen-layer pass (new compositing stage)
+  19 sRGB vs linear toggle ── merges Part I's deferred sRGB item; interacts with 6b surface
+  20 stroking parity audit ── mostly CPU-done; question is the GPU expansion story
+  21 unified scene/command encoding ── refactor; 15–20 make the duplication expensive first
+
+Section D (observability — build alongside C, not after)
+  22 per-stage timing + tile occupancy + visual-diff overlay + equal-correctness bench
+
+Section E (scope) — 23 text/glyph parity (in/out decision, recorded below)
+```
+
+---
+
+## Section A — correctness / test infrastructure
+
+The single highest-leverage investment: turn "parity on N hand-written scenes" into "parity
+proven over a generated input space, with failures automatically minimized to a reproducible
+seed." Everything in Sections C/E rides on this.
+
+### Phase 11 — the correctness contract (spec, no rendering code)  ✅
+
+Write down what we're actually promising, because every "Done when" below cites it. Lives as a
+doc comment block (`internal/parity/contract.go`) plus this section.
+
+- [x] **Tolerance, defined once.** State per-channel premultiplied RGBA tolerance and *why it
+      is what it is*: Δ=0 is required wherever both backends run the same integer/analytic path
+      (many-nodes, clips today); Δ≤1 is the floor set by final 8-bit quantization of independent
+      float pipelines (f64 CPU vs f32 GPU rounding the same value); Δ≤3 is admitted **only** for
+      documented division-based divergence (ColorDodge/ColorBurn `min(1,·)` clamp, Phase 10) and
+      each such site must name the operation. A tolerance above the quantization floor is a
+      **bug budget with an owner**, not a free parameter — new features may not silently widen it.
+      Landed as three constructors — `Identical()` / `Quantized()` / `Budget(tol, why)` — with
+      `Config.Validate` **rejecting** any tolerance above `QuantizationFloor` whose `Why` is empty,
+      so the "name the operation" rule is enforced by the compiler-adjacent path, not by convention.
+- [x] **Two comparison modes, named.** *Exact* = raw premultiplied-RGBA max-channel-delta (the
+      current gate, colorspace-free). *Perceptual* = ΔE (CIE76/CIEDE2000 over sRGB→Lab) and SSIM,
+      used **only** for features where exactness is provably unreachable (image resampling with
+      f32 kernels, mesh-gradient interpolation) — and where used, the exact-mode failure that
+      forced it is recorded. Perceptual mode never *replaces* exact mode; it's a second gate for
+      a named subset. `Mode` is declared now; `Compare` **errors** on Perceptual rather than
+      silently passing, so 12a implements it against a gate that already refuses to lie.
+- [x] **The AA contract (explicit).** Today both backends use **analytic** signed-area coverage
+      (`raster/raster.go` `coverage()`, ported verbatim to `raster.wgsl`) — one coverage value
+      per pixel, no sampling. Declare analytic AA the contract. Record that MSAA and supersampling
+      are **alternative** AA models that would break bit-parity with the analytic path, so they are
+      out of scope for the parity gate; if ever added they get their own golden set at perceptual
+      tolerance, never compared against analytic output. This closes the "analytic vs MSAA vs
+      supersampling" question by *choosing analytic and saying why*.
+
+**Result:** `internal/parity` (`contract.go` spec + types, `compare.go` `Compare`/`Assert`/`Result`,
+stdlib-only so the zero-dep packages are untouched; importable from the quarantined `gpu`/`window`
+modules the way `internal/sample` already is). Every parity gate in the tree now names a `Config`;
+no tolerance literal survives outside the package. `Result` reports the max delta **and its
+location** — the seed of Phase 22's visual-diff overlay.
+
+**The gates got tighter, not just centralized.** Every test previously gated at a blanket `tol=2`,
+which let the Δ=0 scenes regress to Δ=2 undetected and over-budgeted ColorDodge. Re-measured each
+scene and pinned it to its true floor: many-nodes / rect-clip / post-resize / window-resize now gate
+at **Identical (Δ=0)**; solid / gradient / many-segs / path-clips / 10 blend modes / window-gradient
+at **Quantized (Δ≤1)**; only ColorDodge (**Δ≤2**, measured — was over-budgeted at 3) and ColorBurn
+(**Δ≤3**) carry a named `Budget`. All pass at the tightened gates. Note the CPU quantizes via
+`clamp8(v+0.5)` (round-half-up) while the GPU's f32→u8 conversion is the driver's on the
+`rgba8unorm` store — the two rounding rules are the Δ≤1 floor's actual cause, and pinning them is
+exactly Phase 13's job.
+
+*Scope call:* the `>2` in `raster/fill_test.go` is a single-backend assertion against a hand-computed
+blend value, and `tol` in `path`/`raster` flattening tests is a geometry tolerance — neither is a
+cross-backend parity gate, so both correctly stay outside the contract.
+
+### Phase 12 — the differential test machine  ⏳ planned
+
+Four capabilities on one shared corpus + generator. Order is cheapest-first; each is independently
+useful.
+
+#### 12a — golden image corpus with exact + perceptual modes
+
+- [ ] Promote `internal/sample` scenes into a **named corpus** (`internal/corpus`) — each entry
+      `{name, build func() *scene.Scene, tol parity.Config}`. The existing `TestParity*` scenes
+      seed it; feature phases in Section C each add entries.
+- [ ] Extend `internal/goldentest` beyond byte-exact PNG: add `AssertExact` (premultiplied RGBA
+      delta, the current gate) and `AssertPerceptual` (ΔE + SSIM with per-entry thresholds). Golden
+      images stored per corpus entry; `-update` regenerates. The GPU parity tests become
+      "render corpus entry on both backends, assert per its `tol`."
+
+#### 12b — property-based invariants
+
+- [ ] A `internal/parity/props` suite asserting algebraic laws the renderer must obey, checked on
+      generated scenes (not fixed goldens):
+      - **Affine composition:** `render(node∘(A·B)) == render((node∘A)∘B)` within tolerance —
+        transform associativity through the CTM.
+      - **Idempotent clips:** clipping by the same path twice equals clipping once
+        (`clip(clip(x,C),C) == clip(x,C)`).
+      - **Compositing associativity** (for the associative operators only — SrcOver, and the
+        Porter-Duff subset that qualifies after Phase 15): `(A over B) over C == A over (B over C)`.
+      - **Premultiply round-trips:** `premul(unpremul(p)) == p` for every representable pixel;
+        guards the un/re-premultiply used by every non-SrcOver blend path.
+- [ ] Each property runs on **both** backends independently (the law must hold within each) **and**
+      cross-backend (both must agree). A property failure prints the generating seed for 12c replay.
+
+#### 12c — differential fuzzing with automatic shrinking + seed replay + bisect
+
+- [ ] A scene generator seeded by a single `uint64` (deterministic; the seed *is* the repro).
+      Emits random-but-valid scenes: N nodes, random paths/transforms/paints/clips/blend ops drawn
+      from the currently-implemented feature set. Go's native fuzzing (`raster/fuzz_test.go` already
+      exists as a single-backend precedent) drives it; the differential oracle is CPU-vs-GPU exact
+      delta.
+- [ ] **Automatic shrinking:** on a failing seed, minimize by construction — bisect the node list
+      (drop-half, keep the failing half), then per-node strip transform/clip/stroke/gradient down to
+      the smallest scene that still diverges. Report the minimized scene + its delta heat location.
+- [ ] **Bisect mode:** given a failing multi-node scene, binary-search to the **first diverging
+      primitive** — the single node (and pixel span) where CPU and GPU first disagree — so a
+      divergence is attributed to one feature, not "somewhere in a 200-node scene."
+- [ ] **Seed replay:** `go test -run Fuzz -seed=0x...` re-materializes the exact scene headlessly;
+      the minimized scene is also emitted as a corpus entry (12a) so every fuzz find becomes a
+      permanent regression golden.
+
+#### 12d — cross-platform golden reconciliation (gated on-device)
+
+- [ ] The parity claim is currently **Metal-only**. Vulkan and DX12 must produce the *same* GPU
+      output (or the same within a stated tolerance) — otherwise "GPU parity" means "parity on my
+      laptop." Add a reconciliation harness that stores per-corpus golden RGBA and diffs each
+      backend's output against it.
+- [ ] **Hard dependency on Phase 13:** without float-determinism controls, three drivers' f32 ALUs
+      will disagree beyond the quantization floor, and reconciliation would just be perpetually red.
+      So 13 lands first; 12d then asserts Δ≤(quantization floor) across backends, or documents the
+      exact operation forcing perceptual mode (mirroring 11's tolerance discipline).
+- [ ] Runs on-device / in CI matrix only (sandbox is Metal-headless). Structure it so a missing
+      backend **skips**, never fails — same discipline as the windowed-present tests.
+
+**Done when:** a single `go test ./internal/parity/...` runs corpus goldens (exact + perceptual),
+all four invariants on generated scenes, and a fuzz pass that on failure prints a minimized,
+replayable, first-diverging-primitive report; cross-platform reconciliation is green on whatever
+backends the runner exposes.
+
+---
+
+## Section B — making exactness reachable across backends
+
+12d and any "must agree bit-for-bit" claim are impossible if the same WGSL compiles to different
+arithmetic on different drivers. This section removes that variable, then provides an escape hatch
+for the cases where it can't.
+
+### Phase 13 — float determinism controls  ⏳ planned
+
+- [ ] **FMA contraction:** contraction (`a*b+c` fused vs split) changes the low bit and differs by
+      driver. Audit `raster.wgsl` for contraction-sensitive expressions (coverage accumulation, the
+      gradient parameter, the blend recompose) and pin them — split the mul/add explicitly, or
+      confirm the WGSL/target guarantees no contraction. Mirror the exact evaluation order on the
+      CPU side (`raster/fill.go`, `raster/raster.go`) so f64→8-bit and f32→8-bit round the *same*
+      intermediate.
+- [ ] **Operation ordering:** the signed-area sweep and stop-table interpolation must sum in a
+      fixed order on both backends (already true for the row-serial sweep; verify the tiled private
+      accumulation matches). Document any reduction whose order is load-bearing.
+- [ ] **Rounding:** confirm both sides use round-half-away-from-zero (or the same rule) at the final
+      `*255+0.5` quantization; this is the source of the Δ≤1 floor and it must be *the same* Δ≤1,
+      not two different roundings that happen to be close.
+
+**Done when:** 12d's cross-backend delta on the corpus is ≤ the quantization floor (Δ≤1) with every
+residual Δ≥2 site named and justified, matching Phase 11's tolerance discipline.
+
+### Phase 14 — per-tile CPU fallback for inexact GPU features  ⏳ planned
+
+- [ ] Some features may resist bit-exactness on GPU (image resampling with hardware-filtered
+      samplers, mesh-gradient patch interpolation). Rather than widen tolerance globally, allow a
+      **per-tile fallback**: the encoder flags tiles that touch a fallback-marked node; those tiles
+      are rasterized by the CPU reference path and their pixels written into the GPU target before
+      present. Exact tiles stay on GPU.
+- [ ] The seam already exists (both backends share `scene.Scene` and produce premultiplied RGBA);
+      the work is a tile-mask handshake in `renderer.go` + a partial-`cpu.Render` that fills only
+      flagged tiles. Fallback is **opt-in per feature**, logged, and counted (so "how much of the
+      frame fell back" is observable via Section D).
+
+**Done when:** a deliberately-inexact feature renders at exact tolerance overall by CPU-filling its
+tiles, with a benchmark showing the fallback tile count and its frame-time cost.
+
+---
+
+## Section C — rendering features (each on both backends, gated by Section A)
+
+Ordered by independence. Each cites Section A for its gate. None is "done" GPU-only.
+
+### Phase 15 — full Porter-Duff compositing operators  ⏳ planned
+
+Blend modes (Phase 10) answer "how do source and backdrop *colors* combine." Porter-Duff answers
+"how do their *coverages* combine" — a different axis. Today only `SrcOver` exists.
+
+- [ ] Add the 12 PD operators (Clear, Src, Dst, SrcOver, DstOver, SrcIn, DstIn, SrcOut, DstOut,
+      SrcAtop, DstAtop, Xor) as a `paint.CompositeOp` enum, orthogonal to `paint.BlendMode`
+      (per W3C `mix-blend-mode` × `composite`). Node carries both; `Node.Flags` packing extends
+      (or a second field — `Node.Flags` is currently full with `Op`).
+- [ ] CPU: generalize `raster/fill.go` `blend()` to the PD `Fa,Fb` coverage-coefficient form
+      `Co = Fa·αs·Cs + Fb·αb·Cb`. GPU: same coefficients in `raster.wgsl` `composite()`. SrcOver
+      stays the fast premultiplied path on both.
+- [ ] Corpus entries per operator over opaque/translucent/empty backdrop regions (like BlendScene);
+      the associativity property (12b) applies to the associative operators only.
+
+**Done when:** all 12 operators pass exact parity (Δ≤1) per corpus entry; associativity invariant
+green for the qualifying subset.
+
+### Phase 16 — conic + mesh gradients  ⏳ planned
+
+Linear/radial are done. Two more paint kinds:
+
+- [ ] **Conic (angular):** `paint.ConicGradient{Center, Angle, Stops}`; parameter is `atan2` of the
+      inverse-transformed pixel. Same stop-table machinery as linear/radial in both `backend/cpu`
+      `shader.go` and `raster.wgsl`; add the kind to the encoder's gradient geometry. Exact-mode
+      gate (Δ≤1) — it's the same interpolation, only the parameter differs.
+- [ ] **Mesh (Coons-patch / Gouraud):** the hard one. Per-patch bilinear/bicubic color
+      interpolation over a grid of control points. Likely **perceptual-mode** (12a) because f32-vs-f64
+      patch interpolation won't hit Δ≤1, and a candidate for Phase 14 CPU fallback if GPU divergence
+      is large. Decide exact-vs-perceptual by measurement, then record the forcing operation per
+      Phase 11.
+
+**Done when:** conic passes exact parity; mesh passes at its measured-and-documented tolerance,
+with the fallback decision recorded.
+
+### Phase 17 — pattern fills + image sampling  ⏳ planned
+
+- [ ] `paint.Pattern` (a tiled scene/image with its own transform + repeat mode) and `paint.Image`
+      (sample a source RGBA). New `Paint` implementors; encoder uploads image data as a texture
+      (GPU) / holds the source (CPU).
+- [ ] **Pinned filter kernels** (this is the correctness crux, ties to Phase 11's AA/filter
+      contract): nearest and bilinear implemented **identically** on both sides — the CPU does the
+      same weight math the shader does, rather than leaning on a hardware sampler whose filtering is
+      driver-defined. Nearest is exact; bilinear is the first real candidate for perceptual mode +
+      Phase 14 fallback. Repeat/clamp/mirror edge modes pinned identically.
+- [ ] Corpus entries: nearest (exact), bilinear (perceptual or fallback), each repeat mode, non-axis
+      -aligned transforms.
+
+**Done when:** nearest-sampled patterns/images pass exact parity; bilinear passes at documented
+tolerance; filter kernel + edge modes are byte-defined in shared code, not delegated to a sampler.
+
+### Phase 18 — layer / group opacity + masks  ⏳ planned
+
+The first feature that needs a **compositing stage beyond a single node** — a group renders to an
+isolated buffer, then composites as a unit.
+
+- [ ] `scene` gains a group construct (`Group{Nodes, Opacity, Mask, Isolated}`) or a node-range
+      grouping. Group opacity ≠ per-node opacity: `(A over B) at 0.5` differs from `A@0.5 over B@0.5`.
+      Requires rendering the group to an offscreen layer, scaling its alpha, then compositing.
+- [ ] **Masks:** a luminance or alpha mask (a rendered path/gradient/image) multiplied into the
+      group's coverage — a generalization of the existing clip-mask machinery (`Renderer.clipMask`,
+      GPU `clipf[16]` sweep), extended from binary coverage to arbitrary [0,1] mask values.
+- [ ] GPU: a second target texture for the layer + a composite pass; CPU: render group to a scratch
+      `image.RGBA`, then composite. This is the largest structural change in Section C — it adds a
+      pass to both pipelines. Sequence it after 15 (it composites *with* the PD operators).
+
+**Done when:** group-opacity and masked-group corpus entries pass exact parity, and the
+`group ≠ per-node` distinction is proven by a scene that renders differently under each.
+
+### Phase 19 — sRGB vs linear-light compositing toggle  ⏳ planned
+
+Merges Part I's deferred sRGB item (Phase 10 last bullet, gated on 6b's sRGB surface).
+
+- [ ] A `parity.ColorSpace` toggle: composite in linear-light (decode sRGB→linear before blending,
+      re-encode after) vs the current sRGB-space compositing. Applied identically on both backends.
+- [ ] The 6b blit shader already must handle RGBA→BGRA/sRGB surface conversion; this phase makes the
+      **compositing space** explicit and toggleable rather than implicit, and adds the decode/encode
+      to both `raster/fill.go` and `raster.wgsl`. Verify the toggle changes output (blends visibly
+      differ) and that each mode holds CPU/GPU parity independently.
+
+**Done when:** both compositing spaces pass exact parity CPU-vs-GPU, and the linear-vs-sRGB
+difference is demonstrated by a corpus entry that diverges between the two modes.
+
+### Phase 20 — stroking parity audit (joins, caps, dashing, miter limits)  ⏳ planned
+
+Largely **already implemented on CPU** — `path/stroke.go` (joins, caps, miter limit via
+`paint.Stroke`), `path/dash.go` (dashing + phase). GPU consumes it by expanding strokes to fill
+outlines on the CPU side pre-encode. So this is an **audit + parity-lock**, not a build.
+
+- [ ] Enumerate the stroke parameter space (each `path.Join`, each `path.Cap`, miter-limit
+      bevel-fallback boundary, dash pattern + phase, degenerate zero-length subpaths) and add a
+      corpus entry per combination; assert exact parity — since GPU strokes are CPU-expanded today,
+      parity should be Δ≤1 and any gap is a real bug.
+- [ ] Decide the **GPU stroke-expansion story** explicitly and record it: keep CPU expansion (simple,
+      already exact) vs move to GPU (Phase 9 territory, gated on encode-cost measurement). Default:
+      keep CPU expansion; this phase just proves it's complete and correct, and hands the "if it's
+      slow" branch to Phase 9.
+
+**Done when:** every stroke parameter combination has a passing exact-parity corpus entry, and the
+expansion-location decision is written down with its measurement.
+
+### Phase 21 — unified scene/command encoding format  ⏳ planned
+
+Today the CPU backend walks `scene.Scene` directly while the GPU has its own `encode.go`. After
+15–20 add features, that logic is duplicated in two places and drifts — a parity risk by
+construction.
+
+- [ ] Extract a single **command-encoding format** (flattened draw commands + resource tables) that
+      *both* backends consume: GPU uploads it to buffers; CPU interprets it in a scanline loop. The
+      encoder becomes the one place feature semantics live; both renderers become executors of the
+      same command stream.
+- [ ] Do this **after** the feature phases, not before — 15–20 reveal what the format actually needs
+      (PD coefficients, gradient kinds, group/layer boundaries, mask refs), so designing it now would
+      guess. The parity machine (Section A) makes the refactor safe the way it made Part I's rewrites
+      safe.
+
+**Done when:** both backends render the full corpus from one shared encoded representation, parity
+unchanged, with feature logic no longer duplicated across `backend/cpu` and `backend/gpu`.
+
+---
+
+## Section D — performance & observability (build alongside Section C)
+
+### Phase 22 — instrumentation: timing, occupancy, visual diff  ⏳ planned
+
+- [ ] **Benchmark harness at equal correctness.** Extend the existing `bench_test.go` so every
+      benchmark is paired with the parity assertion for the same scene — a speedup is only reported
+      if the output still passes its `tol`. "Faster" that isn't "still correct" is not a result.
+- [ ] **Per-stage timing.** Break the frame into encode / upload / dispatch / readback (and, post-6b,
+      blit / present) with GPU timestamp queries where available; log per-stage ms so a regression is
+      attributed to a stage, not the whole frame. Extends Part I's `logTiming`.
+- [ ] **Tile occupancy metrics.** Per-tile segment-count / node-count / clip-count histogram from the
+      encoder (the data already exists in `TileSegOff`/`TileNodes`); surfaces load imbalance (the
+      "one dense tile stalls the dispatch" failure mode) and quantifies Phase 14 fallback coverage.
+- [ ] **Visual diff overlay tool.** A CLI/debug mode that renders a corpus (or replayed fuzz) scene
+      on both backends and writes a heat-map PNG of per-pixel delta (amplified), plus side-by-side
+      CPU|GPU|diff. This is the human end of 12c's automatic bisect — when a delta is subtle, *look*
+      at where it is. Reuses `internal/goldentest`'s diff-image writing.
+
+**Done when:** `go test -bench` reports frame time only for scenes that pass parity; per-stage +
+occupancy numbers print for the corpus; and the diff tool renders a heat-map for any corpus/seed on
+demand.
+
+---
+
+## Section E — scope decisions (recorded, not deferred)
+
+### Phase 23 — text / glyph rasterization parity: **out of core scope (for now)**
+
+- [ ] **Decision:** glyph rasterization is **out** of the initial parity scope, and the reason is
+      recorded here rather than left open. A glyph is, after flattening, just filled paths — which
+      the parity machine *already* covers — so text adds no new *rasterization* correctness question;
+      what it adds is font loading, hinting, and subpixel positioning, none of which is a renderer
+      concern and all of which would balloon scope. If added later, glyphs enter as ordinary filled
+      `scene.Node` paths through the existing pipeline and are gated by the same corpus/fuzz machine —
+      no special-case path. Hinting/subpixel AA, if ever wanted, would be a *new AA model* and fall
+      under Phase 11's "alternative AA model gets its own perceptual golden set" clause.
+- [ ] **Revisit trigger:** a real target that renders text as a first-class primitive (not
+      pre-outlined paths). Until then, text is representable (as outlined paths) without being a
+      feature.
+
+### Tolerance, restated as a scope decision
+
+Why tolerance is **not zero** everywhere: two independent float pipelines (f64 CPU, f32 GPU) that
+round the *same* value to 8 bits can differ by 1 — that Δ≤1 is quantization, not error, and driving
+it to 0 would mean making one backend match the *other's rounding* rather than the true value, which
+is worse. Δ=0 **is** required and achieved wherever both backends run the same integer/analytic path
+(coverage winding, clip intersection). Tolerance above Δ≤1 is only ever a *named, owned* exception
+(Phase 11). This is the whole philosophy of the project stated as a number: correctness is parity,
+parity is measured, and the measurement has a budget with an owner.
