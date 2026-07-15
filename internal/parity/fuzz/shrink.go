@@ -19,11 +19,20 @@ type Fails func(Spec) bool
 // tolerance for the whole run (see Diff): if shrinking strips the ColorDodge
 // that earned a Δ≤2 budget and the residue still exceeds it, that is a stronger
 // find, not a re-gated one.
+//
+// A candidate must also still be a VALID spec. Nothing the generator emits can
+// currently shrink into an invalid one — bboxRect would have to collapse a
+// polygon to an empty rect, which needs exactly collinear points — but the blast
+// radius if it ever did is out of proportion to the guard: an invalid minimized
+// spec would be written by -emit, rejected by Load, and panic corpus.All() for
+// every test in the tree. Validate is also cheaper than the two renders it
+// short-circuits.
 func Shrink(s Spec, fails Fails) Spec {
+	valid := func(c Spec) bool { return c.Validate() == nil && fails(c) }
 	for {
 		before := s.size()
-		s = shrinkNodes(s, fails)
-		s = shrinkFeatures(s, fails)
+		s = shrinkNodes(s, valid)
+		s = shrinkFeatures(s, valid)
 		if s.size() >= before {
 			return s
 		}
@@ -119,7 +128,8 @@ func shrinkFeatures(s Spec, fails Fails) Spec {
 }
 
 // FirstDiverging returns the index of the earliest node whose prefix already
-// diverges, or -1 if only the whole scene does.
+// diverges, or -1 if no prefix does — including the whole scene, which the
+// caller has usually already established diverges.
 //
 // This is a LINEAR scan, deliberately, where the plan called for a binary
 // search: prefix divergence is not monotone. A later opaque node can paint over
