@@ -2,6 +2,7 @@ package gpu
 
 import (
 	"image"
+	"strconv"
 	"testing"
 
 	"github.com/stohirov/sukho/backend/cpu"
@@ -92,6 +93,54 @@ func BenchmarkEncodeManyNodes(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		EncodeInto(e, s, benchW, benchH)
+	}
+}
+
+// BenchmarkFallback prices the per-tile CPU fallback against how much of the
+// frame it covers. Each coverage runs twice over the same geometry — once marked,
+// once not — so the pair isolates the fallback's cost from the scene's.
+//
+// It clears haveFrame every iteration: Phase 7's fingerprint skip would
+// otherwise make every iteration after the first a no-op and report the cost of
+// comparing a hash. That is also why these numbers include the encode.
+func BenchmarkFallback(b *testing.B) {
+	for _, frac := range []float64{0, 0.25, 0.5, 1} {
+		for _, on := range []bool{false, true} {
+			name := "coverage=" + strconv.Itoa(int(frac*100)) + "%"
+			if on {
+				name += "/fallback"
+			} else {
+				name += "/gpu-only"
+			}
+			b.Run(name, func(b *testing.B) {
+				r, err := NewRenderer(benchW, benchH)
+				if err != nil {
+					b.Skipf("no gpu device: %v", err)
+				}
+				defer r.Release()
+				s := sample.FallbackBand(benchW, benchH, frac, on)
+
+				if err := r.Render(s); err != nil {
+					b.Fatal(err)
+				}
+				r.Sync()
+
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					r.haveFrame = false
+					if err := r.Render(s); err != nil {
+						b.Fatal(err)
+					}
+					r.Sync()
+				}
+
+				// After the loop: ResetTimer clears the extra-metric map.
+				st := r.Stats()
+				b.ReportMetric(float64(st.FallbackTiles), "cpu-tiles")
+				b.ReportMetric(float64(st.FallbackTiles)/float64(st.Tiles)*100, "%frame")
+			})
+		}
 	}
 }
 

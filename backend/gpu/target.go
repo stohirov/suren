@@ -17,7 +17,7 @@ type target struct {
 
 func newTarget(d *Device, w, h int) (*target, error) {
 	tex, err := d.device.CreateTexture(&wgpu.TextureDescriptor{
-		Usage:         wgpu.TextureUsageStorageBinding | wgpu.TextureUsageCopySrc,
+		Usage:         wgpu.TextureUsageStorageBinding | wgpu.TextureUsageCopySrc | wgpu.TextureUsageCopyDst,
 		Dimension:     wgpu.TextureDimension2D,
 		Size:          wgpu.Extent3D{Width: uint32(w), Height: uint32(h), DepthOrArrayLayers: 1},
 		Format:        wgpu.TextureFormatRGBA8Unorm,
@@ -91,6 +91,33 @@ func (t *target) readRGBA(d *Device) (*image.RGBA, error) {
 	}
 	t.readbuf.Unmap()
 	return img, nil
+}
+
+// writeRegion uploads a pixel rect of src into the texture, replacing whatever
+// the compute pass left there. src is a full-frame image; only the rect is read.
+func (t *target) writeRegion(d *Device, src *image.RGBA, x0, y0, x1, y1 int, scratch []byte) ([]byte, error) {
+	w, h := x1-x0, y1-y0
+	if w <= 0 || h <= 0 {
+		return scratch, nil
+	}
+	stride := w * 4
+	if cap(scratch) < stride*h {
+		scratch = make([]byte, stride*h)
+	}
+	scratch = scratch[:stride*h]
+	for y := 0; y < h; y++ {
+		i := src.PixOffset(x0, y0+y)
+		copy(scratch[y*stride:(y+1)*stride], src.Pix[i:i+stride])
+	}
+	return scratch, d.queue.WriteTexture(
+		&wgpu.ImageCopyTexture{
+			Texture: t.tex,
+			Origin:  wgpu.Origin3D{X: uint32(x0), Y: uint32(y0)},
+		},
+		scratch,
+		&wgpu.TextureDataLayout{BytesPerRow: uint32(stride), RowsPerImage: uint32(h)},
+		&wgpu.Extent3D{Width: uint32(w), Height: uint32(h), DepthOrArrayLayers: 1},
+	)
 }
 
 func (t *target) resize(d *Device, w, h int) error {

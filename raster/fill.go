@@ -144,7 +144,12 @@ func softLight(cb, cs float64) float64 {
 	return cb + (2*cs-1)*(d-cb)
 }
 
-func (r *Rasterizer) FillPaint(dst *image.RGBA, p path.Path, m geom.Matrix, sh Shader, rule FillRule, clip image.Rectangle, mode BlendMode, mask []float64) {
+// FillPaint composites p into dst. clip and tiles both restrict which pixels
+// are written, never how coverage is computed: the sweep below always starts at
+// the path's own left edge ax0 and accumulates through skipped columns, so the
+// pixels it does write are bit-identical to those of an unrestricted fill. A
+// nil tiles admits every pixel.
+func (r *Rasterizer) FillPaint(dst *image.RGBA, p path.Path, m geom.Matrix, sh Shader, rule FillRule, clip image.Rectangle, mode BlendMode, mask []float64, tiles *TileMask) {
 	if r.w == 0 || r.h == 0 {
 		return
 	}
@@ -174,6 +179,9 @@ func (r *Rasterizer) FillPaint(dst *image.RGBA, p path.Path, m geom.Matrix, sh S
 		for x := ax0; x < px1; x++ {
 			acc += r.cover[row+x]
 			if x < px0 {
+				continue
+			}
+			if tiles != nil && !tiles.At(x, y) {
 				continue
 			}
 			alpha := coverage(acc-r.area[row+x]/2, rule)

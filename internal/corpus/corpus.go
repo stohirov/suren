@@ -66,6 +66,14 @@ func All() []Entry {
 		// Δ=10 rather than as the single LSB visible at typical depths.
 		{"blend-stack-srcover", 96, 96, func() *scene.Scene { return sample.BlendStack(64, paint.SrcOver) }, parity.Identical()},
 		{"blend-stack-overlay", 96, 96, func() *scene.Scene { return sample.BlendStack(64, paint.Overlay) }, parity.Identical()},
+		// Identical because of the fallback, not despite it: this scene holds a
+		// gradient that the GPU renders at Δ=1, marked for per-tile CPU fallback
+		// (Phase 14). Δ=0 over the whole frame is only reachable if the CPU patch
+		// is bit-exact and lands on exactly the flagged tiles. The same scene
+		// without the mark is the entry below, and it sits at the floor — the pair
+		// is what makes this gate non-vacuous.
+		{"fallback-gradient", sample.FallbackW, sample.FallbackH, func() *scene.Scene { return sample.FallbackScene(true) }, parity.Identical()},
+		{"fallback-gradient-off", sample.FallbackW, sample.FallbackH, func() *scene.Scene { return sample.FallbackScene(false) }, parity.Quantized()},
 	}
 	for _, b := range blendModes {
 		entries = append(entries, Entry{

@@ -175,6 +175,93 @@ func BlendStack(n int, op paint.BlendMode) *scene.Scene {
 	return c.Scene()
 }
 
+// FallbackW/H bound FallbackScene. It is 128x96 = 8x6 tiles at the GPU's tile
+// size of 16, small enough that a test can enumerate the flagged tiles by hand.
+const (
+	FallbackW = 128
+	FallbackH = 96
+)
+
+// FallbackScene probes the per-tile CPU fallback (backend/gpu, Phase 14): every
+// node but one is a pixel-aligned solid, which the GPU renders at Δ=0 for the
+// reason BlendStack documents, and the one exception is an antialiased circle
+// filled with a radial gradient and marked for fallback.
+//
+// That node is inexact on GPU by measurement, not by assumption — it renders at
+// Δ=1 with the mark off (see the fallback-gradient-off corpus entry). Both of
+// its ingredients are things Phase 13 named as living at the floor and not
+// removable by any rounding rule: the gradient parameter and the coverage sweep
+// are evaluated in f32 against the reference's f64, so the same real value can
+// land on either side of a .5 boundary. An earlier draft of this scene used a
+// pixel-aligned rect with a 2-stop linear ramp and rendered at Δ=0 on Metal with
+// the fallback off, which would have made the gate below vacuous; the radial
+// gradient's division and sqrt, and the circle's AA edges, are what make the
+// divergence reliable.
+//
+// So the pair is a two-sided measurement. With the mark ON the whole frame is
+// Δ=0, which can only hold if the CPU patch is bit-exact AND lands on exactly
+// the right tiles: a patch that missed a flagged tile would leave the Δ=1 there,
+// and one that strayed outside would have to reproduce the GPU's pixels exactly
+// to escape notice. With it OFF the same scene sits at Δ=1. Neither entry proves
+// much alone; the difference between them is the result.
+//
+// The circle deliberately covers only part of the frame (12 of 48 tiles). A
+// fallback that flagged every tile would be indistinguishable from "render the
+// whole thing on the CPU", which proves nothing about the tile handshake.
+func FallbackScene(fallback bool) *scene.Scene {
+	c := render.NewCanvas()
+	c.FillColor(path.Rect(geom.RectXYWH(0, 0, FallbackW, FallbackH)), paint.FromRGBA8(20, 22, 28, 255))
+	c.FillColor(path.Rect(geom.RectXYWH(0, 0, 32, 32)), paint.FromRGBA8(40, 90, 160, 255))
+	c.FillColor(path.Rect(geom.RectXYWH(96, 64, 32, 32)), paint.FromRGBA8(160, 90, 40, 255))
+
+	c.SetFallback(fallback)
+	c.Fill(path.Circle(geom.Pt(72, 48), 22), paint.RadialGradient{
+		Center: geom.Pt(66, 42),
+		Radius: 30,
+		Stops: []paint.Stop{
+			{Offset: 0, Color: paint.RGBA(1, 1, 1, 1)},
+			{Offset: 0.55, Color: paint.FromRGBA8(230, 160, 40, 255)},
+			{Offset: 1, Color: paint.RGBA(230/255.0, 69/255.0, 65/255.0, 0.35)},
+		},
+	}, paint.NonZero)
+	c.SetFallback(false)
+
+	return c.Scene()
+}
+
+// FallbackTileRect is the half-open tile rect {tx0, ty0, tx1, ty1} that
+// FallbackScene's marked node covers: the circle spans x=50..94, y=26..70, which
+// at tile size 16 is tiles [3,6)x[1,5) — 12 of the frame's 48. Tests assert the
+// encoder flags exactly these, so a change to the tiling or to the scene has to
+// be acknowledged here rather than silently shrinking what falls back.
+var FallbackTileRect = [4]int{3, 1, 6, 5}
+
+// FallbackBand is FallbackScene's shape without its exactness claim: a solid
+// background under a gradient band covering the top frac of the frame, marked
+// for fallback or not. It exists to sweep fallback coverage from 0 to 1 in a
+// benchmark, which is the only way "how much does falling back cost" has an
+// answer rather than an anecdote — the cost is per flagged tile, so a single
+// coverage figure would say nothing about the slope.
+func FallbackBand(w, h int, frac float64, fallback bool) *scene.Scene {
+	c := render.NewCanvas()
+	c.FillColor(path.Rect(geom.RectXYWH(0, 0, float64(w), float64(h))), paint.FromRGBA8(20, 22, 28, 255))
+	if frac <= 0 {
+		return c.Scene()
+	}
+	band := math.Min(float64(h)*frac, float64(h))
+	c.SetFallback(fallback)
+	c.Fill(path.Rect(geom.RectXYWH(0, 0, float64(w), band)), paint.LinearGradient{
+		P0: geom.Pt(0, 0),
+		P1: geom.Pt(float64(w), band),
+		Stops: []paint.Stop{
+			{Offset: 0, Color: paint.FromRGBA8(230, 160, 40, 255)},
+			{Offset: 1, Color: paint.FromRGBA8(40, 120, 220, 255)},
+		},
+	}, paint.NonZero)
+	c.SetFallback(false)
+	return c.Scene()
+}
+
 func appendPath(dst *path.Path, src path.Path) {
 	it := src.Iter()
 	for {

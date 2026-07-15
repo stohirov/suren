@@ -12,7 +12,19 @@ import (
 )
 
 type Renderer struct {
-	Img     *image.RGBA
+	Img *image.RGBA
+
+	// Tiles restricts rendering to the flagged tiles, leaving every other pixel
+	// of Img untouched. The pixels it does write are bit-identical to those of a
+	// full render of the same scene — see raster.TileMask — which is what lets
+	// the GPU backend patch inexact tiles with reference pixels (Phase 14). A
+	// nil Tiles renders the whole image.
+	//
+	// It does not make the render proportionally cheaper: coverage still sweeps
+	// from each path's left edge, so the saving is the blending and the nodes
+	// that miss every flagged tile, not the rasterization.
+	Tiles *raster.TileMask
+
 	ras     *raster.Rasterizer
 	clipRas *raster.Rasterizer
 	mask    []float64
@@ -28,7 +40,7 @@ func (r *Renderer) Render(s *scene.Scene) error {
 	}
 	view := viewRect(b)
 	for _, n := range s.Nodes {
-		if culled(n, view) {
+		if culled(n, view) || r.tileCulled(n, b) {
 			continue
 		}
 		geo := n.Path
@@ -50,9 +62,23 @@ func (r *Renderer) Render(s *scene.Scene) error {
 			clip = c
 		}
 		mask := r.clipMask(n.Clips, b)
-		r.ras.FillPaint(r.Img, geo, n.Transform, sh, rule, clip, raster.BlendMode(n.Op), mask)
+		r.ras.FillPaint(r.Img, geo, n.Transform, sh, rule, clip, raster.BlendMode(n.Op), mask, r.Tiles)
 	}
 	return nil
+}
+
+// tileCulled skips a node that cannot write to any flagged tile. Its bbox is
+// padded and floor/ceil'd outward, so it never culls a node whose antialiased
+// edge reaches a live tile.
+func (r *Renderer) tileCulled(n scene.Node, b image.Rectangle) bool {
+	if r.Tiles == nil {
+		return false
+	}
+	nb := nodeBounds(n)
+	return !r.Tiles.Overlaps(
+		int(math.Floor(nb.Min.X))-b.Min.X, int(math.Floor(nb.Min.Y))-b.Min.Y,
+		int(math.Ceil(nb.Max.X))-b.Min.X, int(math.Ceil(nb.Max.Y))-b.Min.Y,
+	)
 }
 
 func (r *Renderer) clipMask(clips []scene.ClipPath, b image.Rectangle) []float64 {
@@ -127,7 +153,10 @@ func clipRect(r *geom.Rect) (image.Rectangle, bool) {
 	), true
 }
 
-func culled(n scene.Node, view geom.Rect) bool {
+// nodeBounds is the node's device-space extent, padded by a pixel (and by the
+// stroke's half-width) so it covers every pixel the node's antialiased edge can
+// reach.
+func nodeBounds(n scene.Node) geom.Rect {
 	b := n.Path.Transform(n.Transform).Bounds()
 	pad := 1.0
 	if n.Stroke != nil {
@@ -135,7 +164,11 @@ func culled(n scene.Node, view geom.Rect) bool {
 	}
 	b.Min = b.Min.Sub(geom.Pt(pad, pad))
 	b.Max = b.Max.Add(geom.Pt(pad, pad))
-	return b.Intersect(view).Empty()
+	return b
+}
+
+func culled(n scene.Node, view geom.Rect) bool {
+	return nodeBounds(n).Intersect(view).Empty()
 }
 
 func solidColor(p paint.Paint) (paint.Color, bool) {

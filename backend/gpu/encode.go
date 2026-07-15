@@ -67,13 +67,28 @@ type Encoded struct {
 	TileSegOff    []uint32
 	TileSegIdx    []uint32
 	Clips         []ClipRec
-	Fingerprint   uint64
 
-	flatScratch []geom.Point
-	tileCursor  []uint32
-	rankCursor  []uint32
-	entryOf     []uint32
-	segCursor   []uint32
+	// FallbackTiles flags, per tile (ty*NTilesX+tx), the tiles touched by a node
+	// with scene.Node.Fallback set. The GPU still rasterizes them; the renderer
+	// overwrites them with CPU reference pixels afterwards. NFallback is how many
+	// are set.
+	//
+	// The flag follows the node's bbox, which is the exact extent a fill can
+	// write, so a flagged region is never smaller than the inexact one. Marking
+	// whole tiles rather than pixels is what makes the patch sound: a tile is a
+	// complete composite of the scene restricted to its area, so replacing it
+	// wholesale cannot leave a seam.
+	FallbackTiles []bool
+	NFallback     int
+
+	Fingerprint uint64
+
+	fallbackBBox [][4]float32
+	flatScratch  []geom.Point
+	tileCursor   []uint32
+	rankCursor   []uint32
+	entryOf      []uint32
+	segCursor    []uint32
 }
 
 func Encode(s *scene.Scene, w, h int) *Encoded {
@@ -88,9 +103,14 @@ func EncodeInto(e *Encoded, s *scene.Scene, w, h int) {
 	e.Nodes = e.Nodes[:0]
 	e.Stops = e.Stops[:0]
 	e.Clips = e.Clips[:0]
+	e.fallbackBBox = e.fallbackBBox[:0]
 	for _, n := range s.Nodes {
 		kind, ok := paintKind(n.Paint)
-		if !ok {
+		// An unsupported paint is dropped, which is only sound because the CPU
+		// reference drops it too. A fallback-marked one is different: it is
+		// dropped from the GPU pass but still needs its bbox, or flagging its
+		// tiles — the whole point of the mark — would silently do nothing.
+		if !ok && !n.Fallback {
 			continue
 		}
 		geo := n.Path
@@ -107,13 +127,25 @@ func EncodeInto(e *Encoded, s *scene.Scene, w, h int) {
 		if uint32(len(e.Segments)) == start {
 			continue
 		}
+		bbox := segBounds(e.Segments[start:])
+		if n.Fallback {
+			e.fallbackBBox = append(e.fallbackBBox, bbox)
+		}
+		if !ok {
+			// No GPU node references these segments; they stay in the buffer only
+			// so the fingerprint covers this node's geometry. Dropping them would
+			// let two unsupported-paint nodes with the same bbox but different
+			// paths hash alike, and a scene change that only the CPU pass can see
+			// would be skipped as unchanged.
+			continue
+		}
 		nd := Node{
 			SegStart: start,
 			SegCount: uint32(len(e.Segments)) - start,
 			Rule:     rule,
 			Kind:     uint32(kind),
 			Flags:    uint32(n.Op),
-			BBox:     segBounds(e.Segments[start:]),
+			BBox:     bbox,
 		}
 		e.fillPaint(&nd, kind, n)
 		setClip(&nd, n.Clip, w, h)
@@ -123,7 +155,32 @@ func EncodeInto(e *Encoded, s *scene.Scene, w, h int) {
 	e.NTilesX = (w + tileSize - 1) / tileSize
 	e.NTilesY = (h + tileSize - 1) / tileSize
 	e.buildTiles()
+	e.markFallbackTiles()
 	e.Fingerprint = e.fingerprint()
+}
+
+// markFallbackTiles flags every tile a fallback node's bbox reaches, using the
+// same tileRange the binner uses for node bins, so a node's fallback tiles and
+// its GPU bins agree by construction.
+func (e *Encoded) markFallbackTiles() {
+	nt := e.NTilesX * e.NTilesY
+	if cap(e.FallbackTiles) < nt {
+		e.FallbackTiles = make([]bool, nt)
+	}
+	e.FallbackTiles = e.FallbackTiles[:nt]
+	clear(e.FallbackTiles)
+	e.NFallback = 0
+	for _, bb := range e.fallbackBBox {
+		tx0, tx1, ty0, ty1 := tileRange(bb, e.NTilesX, e.NTilesY)
+		for ty := ty0; ty < ty1; ty++ {
+			for tx := tx0; tx < tx1; tx++ {
+				if !e.FallbackTiles[ty*e.NTilesX+tx] {
+					e.FallbackTiles[ty*e.NTilesX+tx] = true
+					e.NFallback++
+				}
+			}
+		}
+	}
 }
 
 func (e *Encoded) fingerprint() uint64 {
@@ -138,6 +195,12 @@ func (e *Encoded) fingerprint() uint64 {
 	}
 	if len(e.Stops) > 0 {
 		fp = hashWords(fp, unsafe.Pointer(&e.Stops[0]), len(e.Stops)*int(unsafe.Sizeof(e.Stops[0])))
+	}
+	// Without this, toggling Fallback on a node leaves Segments/Nodes/Stops
+	// untouched, so the frame would hash unchanged and Render would skip the
+	// dispatch AND the CPU patch that the toggle exists to schedule.
+	if len(e.FallbackTiles) > 0 {
+		fp = hashWords(fp, unsafe.Pointer(&e.FallbackTiles[0]), len(e.FallbackTiles))
 	}
 	return fp
 }

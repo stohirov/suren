@@ -4,6 +4,8 @@ import (
 	"image"
 
 	"github.com/cogentcore/webgpu/wgpu"
+	"github.com/stohirov/sukho/backend/cpu"
+	"github.com/stohirov/sukho/raster"
 	"github.com/stohirov/sukho/render"
 	"github.com/stohirov/sukho/scene"
 )
@@ -30,6 +32,12 @@ type Renderer struct {
 	lastFP     uint64
 	haveFrame  bool
 	dispatches int
+
+	fbCPU     *cpu.Renderer
+	fbImg     *image.RGBA
+	fbMask    *raster.TileMask
+	fbScratch []byte
+	fbTiles   int
 }
 
 func NewRenderer(w, h int) (*Renderer, error) { return NewRendererOn(Any, w, h) }
@@ -74,6 +82,8 @@ func (r *Renderer) Resize(w, h int) error {
 
 func (r *Renderer) Render(s *scene.Scene) error {
 	EncodeInto(r.enc, s, r.w, r.h)
+	// Safe to skip the CPU patch too: the fingerprint covers the fallback tile
+	// mask, so an unchanged frame's patched pixels are still in the target.
 	if r.haveFrame && r.enc.Fingerprint == r.lastFP {
 		return nil
 	}
@@ -81,6 +91,9 @@ func (r *Renderer) Render(s *scene.Scene) error {
 		return err
 	}
 	if err := r.ras.run(r.dev, r.target, r.segBuf, r.nodeBuf, r.tileOff, r.tileNode, r.stopBuf, r.tileSegOf, r.tileSegIx, r.clipsBuf, r.nx, r.ny); err != nil {
+		return err
+	}
+	if err := r.fallback(s); err != nil {
 		return err
 	}
 	r.lastFP = r.enc.Fingerprint
