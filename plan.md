@@ -392,7 +392,9 @@ dedicated parity scene. (Blend modes ✅; path clips ✅; sRGB remains, gated on
 | glfw drags a display dep into headless builds/CI | quarantine behind `//go:build gpupresent`; default build and test binary never link it |
 | Window resize invalidates fixed-size target | `target.resize` (6a) reallocates texture/readback/dims; surface reconfigured on resize (6b) |
 | Static-scene fingerprint costs more than it saves | Phase 7c: measure hash cost vs upload+dispatch; keep only if net win |
-| Ill-conditioned ops (dodge/burn) make the differential oracle meaningless | Phase 12c: measured Δ=18 with both backends correct; excluded from the generator, still gated exactly by the corpus where inputs are bit-identical |
+| Ill-conditioned ops (dodge/burn) make the differential oracle meaningless | Phase 12c: measured with both backends correct; excluded from the generator, still gated by the corpus where inputs are bit-identical — at the plain floor since Phase 13 |
+| GPU accumulates a tile in f32 while the CPU re-quantizes per node | Phase 13: shader rounds per node (`quant8`); `blend-stack-*` corpus entries gate it at Δ=0 at 64 layers, where a regression shows as Δ=10 |
+| Go fuses FMA on some architectures, making CPU goldens arch-dependent | Phase 13: measured — fusion happens on arm64 but is unobservable at 8 bits (f64 has ~13 orders of headroom); all 21 goldens reproduce bit-for-bit pinned or not |
 | A generated scene renders nothing and passes every gate vacuously | Phase 12c: opaque background by construction; `parity.NonTrivial` skips the residue; the skip rate itself is gated at 3% |
 | A fuzz find stops reproducing when the generator changes | Phase 12c: finds are stored as explicit `Spec` JSON, not seeds — a seed's scene shifted the moment two blend modes were excluded |
 
@@ -441,7 +443,8 @@ Section A (correctness machine)
   12d cross-platform reconciliation ── needs 13 (determinism) + on-device Vulkan/DX12
 
 Section B (make exactness reachable)
-  13 float determinism controls ── gates 12d and any "must agree bit-for-bit" claim
+  13 float determinism controls ✅ ── rounding pinned; what it could not control (FMA
+     contraction) is named and handed to 12d
   14 per-tile CPU fallback ── the escape hatch when 13 can't make a feature exact
 
 Section C (features — each uses A as its gate, B where exactness is at risk)
@@ -517,7 +520,7 @@ exactly Phase 13's job.
 blend value, and `tol` in `path`/`raster` flattening tests is a geometry tolerance — neither is a
 cross-backend parity gate, so both correctly stay outside the contract.
 
-### Phase 12 — the differential test machine  ⏳ in progress (12a ✅, 12b ✅, 12c ✅, 12d gated on 13)
+### Phase 12 — the differential test machine  ⏳ in progress (12a ✅, 12b ✅, 12c ✅; 12d needs on-device Vulkan/DX12)
 
 Four capabilities on one shared corpus + generator. Order is cheapest-first; each is independently
 useful.
@@ -666,7 +669,10 @@ two real things, and both changed the contract rather than the code.
 
 **FINDING 1 — ColorDodge/ColorBurn are ill-conditioned, so the differential oracle does not apply to
 them.** Their blend derivatives are `1/(1-cs)` and `1/cs`, *unbounded*, so they multiply any input
-difference without bound. Measured on the fuzzer's own find (seed `0x737`), isolated by construction:
+difference without bound. *(Phase 13 later found and fixed the difference they were amplifying here —
+the numbers below are pre-fix; the worst generated divergence fell 18 → 5, and their corpus budgets
+were retired. The conclusion is unchanged: 5 is not a bound, it is where a 25000-seed sample stopped.)*
+Measured on the fuzzer's own find (seed `0x737`), isolated by construction:
 
 | scene | Δ |
 |---|---|
@@ -686,8 +692,12 @@ the scene, not of the generator. **This also reframes Phase 10's dodge/burn budg
 because `BlendScene` feeds them pinned inputs, not because the divergence is bounded at 2–3.**
 
 **FINDING 2 — the Δ≤1 floor does not compose across stacked blends, but it is worth exactly one more
-bit.** Both backends composite through an 8-bit intermediate, so a second blend node reads a backdrop
-already quantized (and already possibly 1 LSB apart). A blend's sensitivity to it is
+bit.** *(The mechanism stated here was corrected by Phase 13: at the time, only the CPU quantized
+between nodes — the shader accumulated in f32 and rounded once. Both now round per node. The
+measurement below was identical before and after, because at these depths the residue is seeded by
+f32-vs-f64 coverage rather than by the quantization mismatch, which only dominates past ~8 layers.)*
+A second blend node reads an already-quantized backdrop that may be 1 LSB apart. Its sensitivity to
+it is
 `d(Co)/d(Cb) = αs·B'(cb) + (1-αs)` — **the backdrop alpha cancels** — so a mode with `B'>1` (Overlay
 at `2(1-cs)`) amplifies rather than absorbs. Measured over 3000 seeds, by number of general
 (non-SrcOver) blend nodes:
@@ -700,10 +710,10 @@ at `2(1-cs)`) amplifies rather than absorbs. Measured over 3000 seeds, by number
 **Flat, not compounding** — which is what made this a `Budget(2)` in exact mode rather than a retreat
 to perceptual mode. (The first measurement said Δ=6 and looked unbounded; that was entirely
 dodge/burn contamination, and re-measuring after Finding 1 collapsed it.) Alpha never diverged at any
-depth and cannot: `αo = αs + αb(1-αs)` has gain `(1-αs) ≤ 1`. **Phase 13 is the fix, not a wider
-tolerance:** if pinning the rounding rules drives the per-composite delta to 0, there is nothing left
-to amplify and these scenes should collapse back to the floor — a testable prediction, and
-`stackedBlend` is where it will be observed.
+depth and cannot: `αo = αs + αb(1-αs)` has gain `(1-αs) ≤ 1`. **Phase 13 tried this prediction and it
+failed:** pinning the rounding retired the dodge/burn budgets and removed an unbounded-with-depth
+divergence, but `stackedBlend` survived unchanged — the residue is seeded by f32-vs-f64 coverage and
+gradient evaluation, which no rounding rule reaches.
 
 **The generator's guarantee is checked, not asserted.** Every scene opens with an opaque background
 (without which blend modes collapse to the premultiply round-trip and clipped nodes bite on nothing),
@@ -724,10 +734,14 @@ does, and never modifies a passing spec.
       output (or the same within a stated tolerance) — otherwise "GPU parity" means "parity on my
       laptop." Add a reconciliation harness that stores per-corpus golden RGBA and diffs each
       backend's output against it.
-- [ ] **Hard dependency on Phase 13:** without float-determinism controls, three drivers' f32 ALUs
-      will disagree beyond the quantization floor, and reconciliation would just be perpetually red.
-      So 13 lands first; 12d then asserts Δ≤(quantization floor) across backends, or documents the
-      exact operation forcing perceptual mode (mirroring 11's tolerance discipline).
+- [ ] **Hard dependency on Phase 13 — now satisfied on the controllable half.** The rounding rule is
+      pinned in the shader rather than left to each driver's `rgba8unorm` conversion, which is what
+      makes cross-driver reconciliation askable at all. What 13 could *not* control is FMA
+      contraction: it is implementation-defined, WGSL offers no way to forbid it, and f32 has the
+      headroom to show it (unlike the CPU's f64 — see `contract.go`). So if Vulkan or DX12 diverge
+      past the floor, contraction in the coverage sweep, the gradient parameter, or the blend
+      recompose is the first suspect, and the tile-backdrop summation order (documented at
+      `routeCol`) is the second.
 - [ ] Runs on-device / in CI matrix only (sandbox is Metal-headless). Structure it so a missing
       backend **skips**, never fails — same discipline as the windowed-present tests.
 
@@ -744,31 +758,73 @@ backends the runner exposes.
 arithmetic on different drivers. This section removes that variable, then provides an escape hatch
 for the cases where it can't.
 
-### Phase 13 — float determinism controls  ⏳ planned
+### Phase 13 — float determinism controls  ✅ (12d's on-device half remains)
 
-- [ ] **FMA contraction:** contraction (`a*b+c` fused vs split) changes the low bit and differs by
-      driver. Audit `raster.wgsl` for contraction-sensitive expressions (coverage accumulation, the
-      gradient parameter, the blend recompose) and pin them — split the mul/add explicitly, or
-      confirm the WGSL/target guarantees no contraction. Mirror the exact evaluation order on the
-      CPU side (`raster/fill.go`, `raster/raster.go`) so f64→8-bit and f32→8-bit round the *same*
-      intermediate.
-- [ ] **Operation ordering:** the signed-area sweep and stop-table interpolation must sum in a
-      fixed order on both backends (already true for the row-serial sweep; verify the tiled private
-      accumulation matches). Document any reduction whose order is load-bearing.
-- [ ] **Rounding:** confirm both sides use round-half-away-from-zero (or the same rule) at the final
-      `*255+0.5` quantization; this is the source of the Δ≤1 floor and it must be *the same* Δ≤1,
-      not two different roundings that happen to be close.
-- [ ] **12c handed this phase a measurable success criterion**, not just a task: stacked blend nodes
-      currently earn `Budget(2)` purely because each composite re-quantizes to 8 bits and the next
-      blend amplifies the 1-LSB difference. If pinning the rounding drives the per-composite delta to
-      0, `fuzz.stackedBlend` should collapse to the floor and the budget can be **deleted** — the
-      first tolerance in this tree ever retired by a fix rather than widened. If it does not, the
-      residual is a real per-op divergence that 12c's minimizer can attribute to one node.
-      12c also showed the *sub*-LSB divergence this phase must chase is real and already measurable:
-      a gradient's f32-vs-f64 parameter, invisible at Δ≤1, was amplified ≈54× by ColorDodge.
+**Two budgets retired, one semantic divergence killed, and two "obvious" fixes measured and
+rejected.** Every tolerance in the tree is now the quantization floor except one, which is measured.
+
+- [x] **Rounding — pinned, and it was the whole ballgame.** `raster.wgsl` `quant8` now rounds
+      `floor(v*255+0.5)/255`, matching `clamp8`'s round-half-up, instead of leaving the f32→u8
+      conversion to the driver on the `rgba8unorm` store. An implementation-defined rounding rule
+      cannot be half of a parity contract — Vulkan and DX12 need not round like Metal — so this is
+      also 12d's precondition.
+- [x] **The GPU now quantizes per node, like the reference.** The real find: the CPU composites into
+      an 8-bit `image.RGBA`, re-quantizing after *every* node, while the shader accumulated `fbl` in
+      f32 across all nodes in a tile and rounded **once** at the end. That is a different function,
+      not a more precise one, and the gap **grows without bound with depth**:
+
+      | stacked Overlay layers | 1 | 2 | 4 | 8 | 16 | 32 | 64 |
+      |---|---|---|---|---|---|---|---|
+      | accumulate, round once | 0 | 1 | 1 | 2 | 2 | 6 | **10** |
+      | round per node | 0 | **0** | **0** | **0** | **0** | **0** | **0** |
+
+      12c's generator caps at four nodes, where the effect is a single LSB — it could never have
+      found this. `sample.BlendStack` + the `blend-stack-srcover`/`blend-stack-overlay` corpus
+      entries gate it at **Δ=0** forever (pixel-aligned solids, so nothing but rounding can move
+      them); reverting the shader fails them at Δ=1/Δ=3, verified.
+- [x] **Phase 10's ColorDodge/ColorBurn budgets are deleted.** Both now hold at `Quantized()` — the
+      first tolerances in this tree retired by a fix rather than widened. Their stated reason was
+      also **wrong**: the division never was the culprit, it only *amplified* a backdrop the two
+      backends had quantized differently. Exactly 12c's Finding 1, now with the mechanism named.
+- [x] **FMA contraction — measured, then deliberately NOT pinned.** Go's spec permits fusing `a*b+c`
+      and **it does on arm64** (verified against `math.FMA`), so the CPU reference's arithmetic is
+      architecture-dependent in principle. It is not observable in practice: pinning every hot
+      expression with explicit `float64()` conversions (`geom.Matrix.Apply`, `raster/fill.go`'s
+      SrcOver) reproduced **all 21 CPU goldens bit-for-bit, ~4M channels, Δ=0**. The reason is
+      quantitative and now recorded in `contract.go`: 8-bit output is ~2.4 decimal digits, f64 carries
+      ~15, so the CPU's last-bit noise sits ~13 orders of magnitude below the rounding decision it
+      would have to cross. **f32 has only ~4–5 orders of headroom — which is why the GPU diverges and
+      the CPU cannot.** Pinning the CPU would cost FMA throughput to buy nothing. The same latitude on
+      the GPU is *not* safe by that argument reversed, WGSL offers no way to forbid contraction, and
+      that is now 12d's named first suspect.
+- [x] **Operation ordering — audited; one load-bearing divergence, kept deliberately.** Stop-table
+      interpolation matches term-for-term. The signed-area sweep does **not**: `raster.go` runs one
+      running total left-to-right across the whole row, while the shader collapses everything left of
+      a tile into a scalar backdrop in *segment* order and seeds the tile sweep with it. Equal in
+      exact arithmetic, not in floating point. Fixing it means sweeping whole rows — the exact
+      serialization the 2D-tiling rewrite removed (720 → ~57,600 threads) — so it is recorded at
+      `routeCol` as an accepted contributor to the Δ≤1 floor.
+- [x] **Gradient 16-bit rounding — measured and rejected.** The CPU's gradient is quantized to 16
+      bits (`paint.Color.RGBA()` → `/257`), so the reference never sees a continuous gradient colour.
+      Mirroring it in the shader moved **nothing** (gradient stayed Δ=1; a gradient read through
+      ColorDodge's unbounded derivative stayed Δ=0) — 16-bit error sits ~130× below the 8-bit
+      decision. It is also an artifact of reusing Go's `color.Color` convention rather than a choice
+      the reference made, and matching an artifact costs per-pixel work to enshrine an accident.
+      Recorded at `gradColor` as a known semantic difference living below the floor.
+- [x] **12c's prediction was half right, and the half that failed is the informative one.**
+      `fuzz.stackedBlend`'s `Budget(2)` **survives**: pinning the rounding removed the unbounded-depth
+      divergence and retired dodge/burn, but the residue it gates is seeded by f32-vs-f64 evaluation
+      of *coverage and gradients*, which no rounding rule touches. Still flat at Δ≤2 for 2–4 stacked
+      nodes over 25000 seeds. Retiring it would require both backends to compute in the same
+      precision — which Phase 11 rejected on purpose.
+
+**Result:** corpus deltas after the fix — solid Δ=0, many-nodes Δ=0, clip-rect Δ=0, blend-stack-* Δ=0,
+and **every** other entry Δ=1 including both formerly-budgeted division modes. 472k fuzz executions
+against the tightened gates, no failures. Perf neutral within noise.
 
 **Done when:** 12d's cross-backend delta on the corpus is ≤ the quantization floor (Δ≤1) with every
-residual Δ≥2 site named and justified, matching Phase 11's tolerance discipline.
+residual Δ≥2 site named and justified. *The rounding rule is now pinned rather than driver-defined,
+which is what makes that question askable; the on-device Vulkan/DX12 half is 12d's.*
 
 ### Phase 14 — per-tile CPU fallback for inexact GPU features  ⏳ planned
 
