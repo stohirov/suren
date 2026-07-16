@@ -1517,7 +1517,7 @@ construction.
 **Done when:** both backends render the full corpus from one shared encoded representation, parity
 unchanged, with feature logic no longer duplicated across `backend/cpu` and `backend/gpu`.
 
-### Phase 24 — SVG backend conformance audit  ⏳ planned
+### Phase 24 — SVG backend conformance audit  ✅
 
 Found while writing the release docs (2026-07-16), by reading `svg.go` rather than trusting this
 file's own account of it. The roadmap had recorded the conic drop twice (Phase 16, and the standing
@@ -1550,28 +1550,130 @@ the W3C separable set, `<clipPath>` takes arbitrary path data (the rect case alr
 and the Porter-Duff operators map to `<feComposite operator=…>`. These are omissions, not format
 limits.
 
-- [ ] **Decide the contract and write it down.** Two defensible answers, and the current behaviour
-      is neither: (a) *emit it* — `mix-blend-mode` for blend, `<clipPath>` with path data for
-      `Node.Clips`, and an explicit decision about `<feComposite>`; or (b) *refuse it* — return an
-      error, or a reported list of dropped features, so a caller learns its scene did not survive.
-      What is not defensible is silence, which is what ships today.
-- [ ] **Nothing currently tests any of this.** `backend/svg` has 6 tests and 2 goldens
-      (`sample.svg`, `gradient.svg`), and **not one mentions a clip, a blend mode, or a conic** —
-      verified by grep. Every gap above is not merely unfixed but unobserved, so the first commit
-      here is a test that fails.
-- [ ] **Audit exhaustively over the scene model, not over the paint switch.** The conic drop was
-      found because someone added conic; the blend drop was found by reading the file much later.
-      Enumerate every field of `scene.Node` against what `writeNode` actually reads — that is the
-      check that would have caught all five at once.
+**↑ The last clause of that paragraph is wrong, and the audit's first result was overturning it.**
+See "What the table got wrong" below. The table is kept verbatim because the correction is the
+entry worth having.
+
+- [x] **Decide the contract and write it down.** Chosen: **report**. `Encode` now returns
+      `(Report, error)`; `Report.Dropped` names the node index and the feature, and `Report.Lossy()`
+      is the one-line question. It does **not** error — the document is still written and the node
+      still dropped, exactly as before; the difference is that the caller is now told. Erroring was
+      considered and rejected (below).
+- [x] **Nothing currently tests any of this.** Confirmed and fixed. The suite went from 6 tests and
+      2 goldens to a conformance file with a test per row, and **7 of them were red against the
+      code as it stood**: `TestBlendModeEmitsMixBlendMode`, `TestEverySeparableBlendModeHasACSSName`
+      (11 subtests), `TestCompositeOpIsReported`, `TestBlendUnderNonSrcOverCompositeIsNotEmitted`,
+      `TestPathClipEmitsClipPath`, `TestPathClipEvenOddEmitsClipRule`, `TestNestedPathClipsIntersect`.
+- [x] **Audit exhaustively over the scene model, not over the paint switch.** Done, field by field
+      over `scene.Node` against what `writeNode` reads. Result below: the five rows are confirmed,
+      `Fallback` is correctly ignored, and there is **no sixth field**.
+
+#### What the field-by-field audit found that the paint switch could not
+
+The exhaustive pass over `scene.Node` confirmed the table's five rows and added nothing to them —
+so the prediction that a sixth gap was hiding in the node model was **wrong**. What it did produce
+is four **near misses**: places where the SVG backend is correct, but only because two
+coordinate-space or default-value conventions happen to line up. None was verified before; all four
+are now recorded because each is one refactor away from becoming a real gap.
+
+| Checked | Why it could have been wrong | Measured |
+|---|---|---|
+| Gradient coordinate space | `paintRef` emits `gradientUnits="userSpaceOnUse"`, which SVG resolves **inside** the element's own `transform`. If the model's gradients were device-space, every transformed node's gradient would be doubly transformed. | **Correct.** `cpu/shader.go` does `minv.Apply(pixel)` — the device pixel is mapped *back* into local space, so gradients are pre-transform, exactly like `Node.Path`. The two conventions agree. |
+| Stroke width space | SVG scales `stroke-width` by the element's `transform`. A renderer that expanded the stroke in device space would disagree under any scale. | **Correct.** `cpu.strokeOutline` strokes `n.Path` untransformed and `FillPaint` applies the matrix afterwards, so width rides the transform as SVG expects. |
+| Miter limit default | `writeStroke` omits `stroke-miterlimit` when `MiterLimit == 0`. If the renderer's default were anything but SVG's, every unset miter join would differ. | **Correct.** `path.Stroker.miterLimit()` returns **4** for a non-positive value; SVG's initial value is also 4. Omission is the right encoding. |
+| Dash odd-count + phase | SVG repeats an odd-length `stroke-dasharray` to even length. A renderer that cycled the raw pattern instead would invert every other dash. | **Correct.** `path.normalizeDash` does `pat = append(pat, pat...)` for odd input — SVG's own rule — and `dashStart` consumes a positive phase forward into the pattern, matching `stroke-dashoffset`. |
+
+#### What the table got wrong
+
+**`Node.Composite` is not expressible in SVG.** This document filed it under "expressible and simply
+not emitted", mapping it to `<feComposite operator=…>`. That is wrong. `feComposite` combines two
+**filter inputs** inside a filter graph; it does not composite an element against the canvas
+backdrop. Doing that requires `BackgroundImage` as a filter input — which SVG 1.1 defined, **no
+browser ever implemented, and SVG 2 removed**. So `Composite` belongs beside conic and mesh as a
+**format limit**, not beside blend as an omission. The row moved class:
+
+| Feature | Class as recorded | Class as measured |
+|---|---|---|
+| Composite op (`Node.Composite`) | wrong output — expressible, not emitted | **wrong output — and NOT expressible.** Reported, not emitted. |
+
+**And the blend row is coupled to the composite row — which a table of independent rows cannot
+say.** `mix-blend-mode` **implies source-over compositing**; CSS has no way to spell "multiply, but
+XOR-composited". So a node with `Op=Multiply, Composite=Xor` cannot have its blend emitted either:
+`mix-blend-mode:multiply` under `Xor` renders Multiply-**over**, which is not a partial answer but a
+**different wrong one**. Blend is emitted only where `Composite == SrcOver`; otherwise both axes drop
+together and the report names both.
+
+This is the finding, and it is a finding about the *shape* of the table rather than a row in it. The
+table invites fixing each row on its own, and fixing the blend row alone — the obvious reading — would
+have replaced a silent wrong output with a reported-but-still-wrong one and looked like progress.
+`TestBlendUnderNonSrcOverCompositeIsNotEmitted` is the gate that pins it. The audit was asked to look
+for a sixth *field*; the thing it actually found was a dependency between two fields, which is why
+reading the scene model did not surface it and reading the format spec did.
+
+#### Measured
+
+- **SVG cannot fully express 18 of the 43 corpus scenes; 25 encode losslessly.** Logged per-run by
+  `TestCorpusLossReportIsAudited`, which pins the list rather than merely printing it — a silently
+  growing set of drops is exactly what this phase found, and a test that logs without asserting
+  would let it happen again while staying green. The 18: the 11 non-`SrcOver` composite scenes, the
+  4 `composite-x-blend-*` crosses, `gradient-conic`, `gradient-conic-seam`, and `mesh`.
+- **11 corpus blend scenes now carry their mode onto the wire.** Every one of them exported as
+  **Normal** before this phase — the wrong output was live across the whole blend family, not a
+  corner case.
+- The two goldens (`sample.svg`, `gradient.svg`) **did not move**, which is its own small finding:
+  the existing golden scenes contain no clip, blend or composite at all. They could not have caught
+  any of this.
+
+#### Tried and rejected
+
+- **Erroring on an inexpressible node.** The strictest reading of "silence is not an option", and
+  rejected on two grounds. It breaks every existing caller whose scene contains a conic or mesh —
+  including `examples/07-conic-mesh`, which exists precisely to demonstrate the paints SVG lacks —
+  and it conflates "this scene did not survive intact" with "this export failed", which are
+  different facts. A dropped conic still produces a useful document. The report says so without
+  making the caller handle an error it usually cannot act on.
+- **Emitting `mix-blend-mode` unconditionally and reporting the dropped composite separately.**
+  Maximizes fidelity in the common `SrcOver` case and knowingly ships wrong pixels in the coupled
+  case. Rejected: it trades a silent wrong output for a reported wrong output, and this phase's whole
+  argument is that a node which is present, plausible and wrong is the failure worth removing.
+- **Merging multiple clips into one `<clipPath>`.** Two children inside one `<clipPath>` **union**;
+  a clip stack **intersects**. Nesting one `<g>` per clip is what intersects in SVG, and the failure
+  mode of getting it wrong is *too much surviving*, which looks like a rendering bug rather than an
+  encoding one. `TestNestedPathClipsIntersect` pins the nesting.
+
+#### The gate, and why it is not a parity gate
 
 **Not a parity question.** SVG emits vectors, not pixels, so there is nothing to diff at the channel
-level and none of this belongs to the tolerance contract. It gets its own goldens. That is precisely
-why it drifted: **the SVG backend is the one output path the parity machine does not watch**, and it
-accumulated five silent gaps while the two rasterizers were held to Δ≤1 over millions of executions.
-The apparatus only protects what it is pointed at.
+level and none of this belongs to the tolerance contract. That is precisely why it drifted: **the SVG
+backend is the one output path the parity machine does not watch**, and it accumulated five silent
+gaps while the two rasterizers were held to Δ≤1 over millions of executions. The apparatus only
+protects what it is pointed at — so fixing the five gaps without pointing something at it would have
+left the diagnosis true and merely reset the clock.
 
-**Done when:** every `scene.Node` field is either honoured by the SVG backend or reported to the
-caller, with a test per row of the table above, and the contract is written down rather than implied.
+Three gates now watch it, and each was verified by injection:
+
+- **`TestEverySceneNodeFieldHasAnSVGContract`** — reflects over `scene.Node` and fails if any field
+  has no recorded answer in `svgFieldContract`, or if the map names a field the struct no longer has.
+  This is the structural answer to "the conic drop was found because someone added conic": a field
+  added tomorrow with no SVG decision is now a **build failure rather than a discovery**. Deciding to
+  ignore a field is a valid answer — `Fallback` is one — but it must be *decided*.
+  *Injection:* adding `Opacity float64` to `scene.Node` turns it red naming the field (and `Opacity`
+  is Phase 18's own planned field, so this gate will fire for real when group opacity lands);
+  deleting the `Clips` row turns it red from the other direction. Restored, green.
+- **`TestCorpusScenesEncodeAsWellFormedXML`** — the same 43 scenes the differential runs, through
+  this encoder, asserted to parse. A far weaker claim than parity, and stated as the weaker claim it
+  is: well-formed XML is not correct SVG. Its value is breadth — before this phase, zero corpus
+  scenes had ever been through the SVG backend.
+- **`TestCorpusLossReportIsAudited`** — pins which scenes are lossy and why. *Injection:* removing
+  the `rep.drop` call in `Encode` turns `TestConicPaintIsReported` and `TestMeshPaintIsReported` red;
+  restored, green. Worth recording that those two were **green from the moment they compiled**,
+  because the reporting arrived with the `Report` type itself — so unlike the other seven they were
+  never observed red, and the injection is the only evidence they gate anything.
+
+**Done:** every `scene.Node` field is either honoured or reported; the contract is written down in
+`svgFieldContract` and enforced by reflection; 43 corpus scenes and a per-row conformance suite watch
+the backend that nothing watched before. `Encode`'s signature changed to `(Report, error)` — a
+breaking change, taken deliberately **before** the v0.1.0 tag rather than after.
 
 ---
 

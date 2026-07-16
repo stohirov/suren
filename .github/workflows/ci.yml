@@ -1,0 +1,145 @@
+# CI for suren.
+#
+# WHAT THIS DOES NOT COVER, STATED FIRST — because a green badge that implies
+# more than it checked is the same species of problem as a backend-selection API
+# that reports success for an adapter it never selected (see Phase 12d).
+#
+#   The GPU suite does not run here. There is no runner for it.
+#   GitHub's Linux runners have no GPU, and the macOS runners have no dependable
+#   Metal device. The cross-backend parity gate — the corpus, the property laws,
+#   the differential fuzzer's GPU half — is Metal-only and is run locally on
+#   darwin/arm64. This workflow gates the pure-Go core and the two structural
+#   claims (zero-dep, glfw quarantine) that CI can actually decide.
+#
+# What it DOES buy that a local run cannot: the CPU goldens run on **amd64**.
+# That is Phase 13's FMA claim checked rather than argued — Go fuses FMA on
+# arm64, and the claim is that f64's ~13 orders of headroom make it unobservable
+# at 8 bits. Every golden reproducing bit-for-bit on a non-fusing amd64 host is
+# the evidence. If a golden diverges here, Phase 13 is wrong and that is a
+# finding, not a flake — do not paper over it.
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    name: Pure-Go core (ubuntu/amd64 — Phase 13's FMA claim, off arm64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: false # the core has no deps to cache; see the zero-dep job
+      - run: go build ./...
+      - run: go vet ./...
+      # -count=1 so a cache hit can never stand in for a run on this hardware,
+      # which is the entire reason this job exists.
+      - name: go test (43 CPU goldens, property laws, 64-seed differential sweep)
+        run: go test -count=1 ./...
+
+  zero-dep:
+    name: Zero-dep quarantine (a convention until this job existed)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: false
+      # The claim: geom/path/paint/raster/scene/render + backend/cpu, png, svg
+      # pull ZERO third-party code. A package path whose first element contains a
+      # dot is a module path rather than a stdlib one; anything matching that and
+      # not our own is a dependency.
+      #
+      # This detector is verified to fire: run it in backend/gpu and it reports
+      # cogentcore/webgpu; in backend/window it reports Ebiten. A check that
+      # cannot fail is worse than no check.
+      - name: no third-party packages reachable from the core module
+        run: |
+          deps=$(go list -deps ./... | grep -E '^[^/]+\.[^/]+/' | grep -v '^github.com/stohirov/suren' || true)
+          if [ -n "$deps" ]; then
+            echo "::error::the core module reached third-party code; the zero-dep claim is broken:"
+            echo "$deps"
+            exit 1
+          fi
+          echo "core module deps: stdlib only"
+      - name: the detector can fail (proves the check above is not vacuous)
+        run: |
+          cd backend/gpu
+          found=$(go list -deps ./... | grep -E '^[^/]+\.[^/]+/' | grep -v '^github.com/stohirov/suren' | head -1 || true)
+          if [ -z "$found" ]; then
+            echo "::error::the zero-dep detector found nothing in backend/gpu, which links cogentcore/webgpu."
+            echo "::error::The detector is broken, so the green result in the previous step means nothing."
+            exit 1
+          fi
+          echo "detector fires correctly in a module with deps (found: $found)"
+      - name: go.sum is empty
+        run: |
+          if [ -s go.sum ]; then
+            echo "::error::go.sum is non-empty; the core module took a dependency:"
+            cat go.sum
+            exit 1
+          fi
+          echo "go.sum is empty or absent, as the README claims"
+
+  glfw-quarantine:
+    name: glfw quarantine (6b verified this by hand; this keeps it true)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: false
+      # 6b's claim, verbatim: `go list -deps -test ./...` links 0 glfw packages
+      # untagged and 2 tagged. The default build and the CI test binary carry no
+      # display library, which is what lets the blit be tested headlessly.
+      - name: core module links no glfw
+        run: |
+          n=$(go list -deps -test ./... | grep -ci glfw || true)
+          if [ "$n" != "0" ]; then
+            echo "::error::the core module links $n glfw package(s); the quarantine is broken"
+            exit 1
+          fi
+          echo "core: 0 glfw packages"
+      - name: backend/gpu links no glfw untagged, and does behind the tag
+        run: |
+          cd backend/gpu
+          untagged=$(go list -deps -test ./... | grep -ci glfw || true)
+          tagged=$(go list -tags gpupresent -deps -test ./... | grep -ci glfw || true)
+          echo "backend/gpu: untagged=$untagged tagged=$tagged"
+          if [ "$untagged" != "0" ]; then
+            echo "::error::backend/gpu links glfw WITHOUT the gpupresent tag; the quarantine is broken"
+            exit 1
+          fi
+          # The tagged count is asserted non-zero on purpose. If it were 0 the
+          # untagged check above would be passing vacuously — the tag would be
+          # gating nothing, and glfw would have quietly left the build entirely.
+          if [ "$tagged" = "0" ]; then
+            echo "::error::the gpupresent tag pulls in 0 glfw packages, so the untagged check proves nothing"
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
+  # NOT PRESENT, DELIBERATELY: a GPU job.
+  #
+  # A macOS runner enumerating a real Metal adapter would partially close 12d and
+  # would be worth having. It is not attempted here because it has not been TRIED,
+  # and this project does not ship a gate whose behaviour it has not observed.
+  #
+  # If it is attempted, 12d records the trap in advance:
+  # `RequestAdapterOptions.BackendType` is SILENTLY IGNORED by this binding and
+  # will hand back the wrong adapter while reporting success. So a job that asks
+  # for Metal and gets a green result has proven nothing. It must read the
+  # adapter's OWN reported backend via `Device.Describe()` and fail if it is not
+  # Metal — otherwise CI would claim GPU parity from a software rasterizer, which
+  # is worse than having no GPU job at all.
+  # ---------------------------------------------------------------------------

@@ -78,7 +78,7 @@ func main() {
 		log.Fatal(err)
 	}
 	defer svgFile.Close()
-	if err := svg.Encode(svgFile, c.Scene(), w, h); err != nil {
+	if _, err := svg.Encode(svgFile, c.Scene(), w, h); err != nil {
 		log.Fatal(err)
 	}
 

@@ -75,8 +75,16 @@ means the "readback" never crosses a bus. On a discrete GPU it should matter mor
 this project has no discrete GPU to say so on. The blit is gated headlessly at Δ=0; the
 display itself is on-device only, and only Metal has run it.
 
-**No CI.** There is no workflow in this repo, so there is no badge claiming one.
-`go test ./...` is the gate, run by hand.
+**CI runs the pure-Go core only, and says so.** The GPU suite has no runner —
+GitHub's Linux runners have no GPU and its macOS runners have no dependable Metal
+device — so the cross-backend parity gate is Metal-only and run by hand on
+darwin/arm64. Faking it would be worse than not having it. What CI does buy that a
+local run cannot is **amd64**: the 43 CPU goldens run on hardware that is not this
+one, which is [Phase 13](docs/roadmap.md)'s FMA claim checked rather than argued
+(Go fuses FMA on arm64; the claim is that f64's ~13 orders of headroom make it
+unobservable at 8 bits). It also turns two conventions into gates — the zero-dep
+quarantine and the glfw one — each with a step that proves the detector can still
+fail.
 
 Not implemented: patterns/images, group opacity/masks, an sRGB-vs-linear toggle.
 See [Features](#features).
@@ -155,7 +163,7 @@ a separate module and an explicit `go get`.
 | [`04-dash`](examples/04-dash) | Dash patterns and phase |
 | [`05-scene`](examples/05-scene) | A composed scene: transforms, translucency, strokes → PNG + SVG |
 | [`06-gradient`](examples/06-gradient) | Linear and radial gradients, a gradient-painted stroke → PNG + SVG |
-| [`07-conic-mesh`](examples/07-conic-mesh) | Conic + mesh gradients → **PNG only**, and the reason is [Phase 24](docs/roadmap.md): the SVG backend would silently drop every shape in it |
+| [`07-conic-mesh`](examples/07-conic-mesh) | Conic + mesh gradients → **PNG only**, and the reason is [Phase 24](docs/roadmap.md): SVG has no conic or mesh primitive, so it would drop every shape in it — it now says so rather than dropping them in silence |
 
 ## Architecture
 
@@ -306,28 +314,41 @@ none of which is a renderer concern. If added later, glyphs enter as ordinary fi
 |---|---|---|
 | `backend/cpu` | `cpu.Render(s, w, h) *image.RGBA` | The reference. f64 throughout. Zero deps. |
 | `backend/png` | `png.Encode(w, s, pxW, pxH) error` | `cpu.Render` + stdlib PNG. Zero deps. |
-| `backend/svg` | `svg.Encode(w, s, pxW, pxH) error` | Vector output. **Silently drops features — see below.** Zero deps. |
+| `backend/svg` | `svg.Encode(w, s, pxW, pxH) (Report, error)` | Vector output. **Reports what it could not express — see below.** Zero deps. |
 | `backend/gpu` | `gpu.NewRenderer(w, h)` / `gpu.NewRendererOn(backend, w, h)` | WebGPU compute. Own module, cgo. |
 | `backend/gpu` (present) | `gpu.RunPresent(title, w, h, frame)` | Native wgpu surface, no readback. Needs `-tags gpupresent` (quarantines glfw). |
 | `backend/window` | `window.Run(...)` / `window.RunGPU(...)` | Ebiten loop. `RunGPU` uses the readback bridge. Own module, cgo. |
 
-**The SVG backend has five silent gaps, and three of them are wrong output rather
-than missing output.** Read from `svg.go`:
+**The SVG backend tells you what it could not export.** It had five silent gaps until
+[Phase 24](docs/roadmap.md); three were *wrong output* — a Multiply node exported as
+Normal, a clipped node exported unclipped — which is worse than missing output,
+because the result is present and plausible. `Encode` now returns a `Report`:
 
-- **Wrong output** — the node is present, plausible and incorrect: **blend modes**
-  and **composite ops** are never read, so a Multiply node exports as **Normal**;
-  **path clips** (`Node.Clips`) are ignored, so a clipped node exports unclipped.
-  All three are expressible in SVG (`mix-blend-mode`, `<clipPath>` with path data,
-  `<feComposite>`) and simply are not emitted.
-- **Missing output** — a genuine format limit: **conic** and **mesh** paints are
-  dropped whole (`paintRef`'s default case returns false and the caller skips the
-  node). SVG 1.1/2 have no conic or mesh primitive.
+```go
+rep, err := svg.Encode(w, c.Scene(), 400, 300)
+if rep.Lossy() {
+	log.Printf("SVG dropped: %v", rep.Dropped) // e.g. [{2 conic paint}]
+}
+```
 
-Nothing errors and nothing reports. It is not part of the parity contract — it emits
-vectors, not pixels, so there is nothing to diff at the channel level — and that is
-exactly why it drifted: **it is the one output path the parity machine does not
-watch.** Tracked as [Phase 24](docs/roadmap.md). Treat it as a convenience exporter
-for solid/linear/radial fills, strokes, transforms and rect clips.
+- **Emitted** — blend modes (`mix-blend-mode`), path clips (`<clipPath>` with path
+  data, nested so they intersect), plus the solid/linear/radial fills, strokes,
+  transforms, fill rules and rect clips that always worked.
+- **Reported** — conic and mesh paints, and any non-`SrcOver` composite. All three
+  are genuine format limits. **Porter-Duff is not expressible in SVG**, which
+  corrects this project's own earlier claim: `<feComposite>` combines filter
+  *inputs*, not an element against the canvas backdrop — that needs
+  `BackgroundImage`, which no browser implemented and SVG 2 removed.
+- **Coupled, and this is the subtle one** — `mix-blend-mode` implies source-over, so
+  a node's blend is only emitted when its composite is `SrcOver`. Emitting it under
+  `Xor` would render Multiply-*over*: a different wrong answer, not a closer one.
+
+Measured: **SVG cannot fully express 18 of the 43 corpus scenes; 25 encode
+losslessly.** It is not part of the parity contract — it emits vectors, not pixels,
+so there is nothing to diff at the channel level — and that is exactly why it
+drifted: **it was the one output path the parity machine did not watch.** It is
+watched now, by the corpus and by a reflection gate that fails the build if a
+`scene.Node` field is ever added without an SVG answer.
 
 ## Running the tests
 
