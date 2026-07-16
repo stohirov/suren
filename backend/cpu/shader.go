@@ -49,6 +49,33 @@ func (m meshShader) RGBA(px, py int) (r, g, b, a float64) {
 	return float64(cr) / 257, float64(cg) / 257, float64(cb) / 257, float64(ca) / 257
 }
 
+// imgShader samples an image paint. Unlike gradShader and meshShader it does NOT
+// go through paint.Color.RGBA(), and the reason is a bug it would otherwise
+// introduce rather than a rounding rule it declines: RGBA() premultiplies, and
+// ImageAt has already returned premultiplied values (see paint.Image), so routing
+// them through it would multiply by alpha twice. There is also nothing to
+// quantize — a texel is 8-bit at the source, so the 16-bit round trip the
+// gradients inherit from Go's color.Color convention has no meaning here.
+//
+// The *255 is the Shader contract's scale (premultiplied, 0..255), and for Nearest
+// it is exact: float64(b)/255*255 == float64(b) for every byte, which
+// TestNearestIsATexelCopy pins because the claim that nearest introduces no
+// arithmetic of its own rests on it.
+type imgShader struct {
+	minv geom.Matrix
+	ok   bool
+	im   paint.Image
+}
+
+func (s imgShader) RGBA(px, py int) (r, g, b, a float64) {
+	if !s.ok {
+		return 0, 0, 0, 0
+	}
+	q := s.minv.Apply(geom.Pt(float64(px)+0.5, float64(py)+0.5))
+	c := paint.ImageAt(s.im, q)
+	return c.R * 255, c.G * 255, c.B * 255, c.A * 255
+}
+
 func shader(p paint.Paint, m geom.Matrix) (raster.Shader, bool) {
 	minv, ok := m.Invert()
 	switch g := p.(type) {
@@ -88,6 +115,16 @@ func shader(p paint.Paint, m geom.Matrix) (raster.Shader, bool) {
 		}}, true
 	case paint.MeshGradient:
 		return meshShader{minv, ok, g.Triangles}, true
+	case paint.Image:
+		// An invalid Image is dropped here rather than shaded transparent, so that
+		// the GPU encoder — which cannot upload texels that are not there — drops the
+		// node for the same reason and the two agree by construction. paint.ImageAt
+		// returns transparent for one anyway; this is the encoder's contract, not a
+		// second opinion about the colour.
+		if !g.Valid() {
+			return nil, false
+		}
+		return imgShader{minv, ok, g}, true
 	default:
 		return nil, false
 	}

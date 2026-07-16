@@ -197,8 +197,61 @@ func randTransform(rng *rand.Rand) geom.Matrix {
 	return m.Mul(geom.Translate(-cx, -cy))
 }
 
+// randImage emits BILINEAR images only, and the exclusion of Nearest is the same
+// measured scope decision as randConic's closed loops and blendModes' omission of
+// ColorDodge/ColorBurn. A differential oracle needs a well-conditioned function.
+//
+// Nearest is a step function of the sample point, so a pixel whose q lands within
+// f32's reach of a texel boundary reads a different texel on each backend and the
+// two differ by whatever those texels differ by — with both individually correct,
+// and with no derivative to bound because the magnitude is the TEXELS'. Measured,
+// not argued: backend/gpu's TestNearestDivergesAtATexelBoundary gets Δ=255 against
+// a control at Δ=0.
+//
+// Note this is the reverse of what Phase 17 planned, which is why it is worth
+// stating twice: the plan expected to exclude BILINEAR here and reach for
+// perceptual mode or a Phase 14 fallback for it. Bilinear is continuous — across
+// every texel boundary and, since all three edge modes are total, across every tile
+// boundary too — so it sits at the ordinary floor and generates freely. The filter
+// the plan called exact is the one the oracle cannot cover.
+//
+// Excluding nearest costs little coverage: the same generated scene still exercises
+// the inverse transform, both floors, the wrap, the atlas fetch, and all three edge
+// modes. Only the branch that picks one texel instead of four is out, and that is
+// pinned by six corpus entries where the geometry is a property of the scene rather
+// than of a seed.
+//
+// Texels are random rather than smooth, deliberately: a smooth image would make the
+// four-texel average nearly constant and hide an indexing error inside its own
+// interpolation.
+func randImage(rng *rand.Rand) PaintSpec {
+	w, h := 2+rng.IntN(7), 2+rng.IntN(7)
+	pix := make([]byte, w*h*4)
+	for k := 0; k < len(pix); k += 4 {
+		c := randColor(rng)
+		// Stored premultiplied, which is what paint.Image holds — a texel with a
+		// channel above its own alpha is not a representable premultiplied colour and
+		// would make the average mean something else.
+		a := uint8(c.A*255 + 0.5)
+		pix[k] = uint8(c.R*float64(a) + 0.5)
+		pix[k+1] = uint8(c.G*float64(a) + 0.5)
+		pix[k+2] = uint8(c.B*float64(a) + 0.5)
+		pix[k+3] = a
+	}
+	return PaintSpec{
+		Kind:   PaintImage,
+		ImgW:   w,
+		ImgH:   h,
+		Pix:    pix,
+		Filter: paint.Bilinear,
+		Edge:   []paint.EdgeMode{paint.Clamp, paint.Repeat, paint.Mirror}[rng.IntN(3)],
+	}
+}
+
 func randPaint(rng *rand.Rand) PaintSpec {
-	switch rng.IntN(6) {
+	switch rng.IntN(7) {
+	case 4:
+		return randImage(rng)
 	case 0:
 		return PaintSpec{
 			Kind:  PaintLinear,

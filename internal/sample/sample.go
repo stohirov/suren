@@ -191,6 +191,90 @@ func MeshScene() *scene.Scene {
 	return c.Scene()
 }
 
+// Checker is the source texels every image scene samples: a small premultiplied
+// RGBA8 image chosen so that a wrong answer looks wrong rather than plausible.
+//
+// Three properties, each load-bearing:
+//
+//   - Adjacent texels differ HARD (two saturated colours on a checkerboard), so
+//     nearest and bilinear cannot be mistaken for one another and an off-by-one
+//     index is a visible colour rather than a near-miss. A smooth source image
+//     would make a mis-indexed fetch look like a rounding artifact.
+//   - Alpha ramps down the rows, so premultiplication is not a constant factor the
+//     wrong interpolation space could hide behind, and the top row is fully
+//     transparent — the case where averaging STRAIGHT colours would bleed an
+//     invisible colour into the edge and averaging premultiplied ones does not.
+//   - Column 0 is white, which makes the image asymmetric. Without it a transposed
+//     or flipped index still produces a checkerboard, and every gate would pass on
+//     an image sampled sideways.
+func Checker(w, h int) paint.Image {
+	pix := make([]uint8, w*h*4)
+	for j := range h {
+		a := uint8(255 * j / max(h-1, 1))
+		for i := range w {
+			r, g, b := uint8(30), uint8(90), uint8(220)
+			if (i+j)%2 == 0 {
+				r, g, b = 240, 60, 30
+			}
+			if i == 0 {
+				r, g, b = 255, 255, 255
+			}
+			k := (j*w + i) * 4
+			pix[k], pix[k+1], pix[k+2], pix[k+3] = premul8(r, a), premul8(g, a), premul8(b, a), a
+		}
+	}
+	return paint.Image{W: w, H: h, Pix: pix}
+}
+
+func premul8(v, a uint8) uint8 { return uint8((int(v)*int(a) + 127) / 255) }
+
+const imageSrcW, imageSrcH = 8, 8
+
+// ImageScene samples Checker three ways under one filter and edge mode.
+//
+// The first node is deliberately LARGER than the image in paint space, which is
+// what makes the edge mode visible at all: inside [0,W]x[0,H] the three modes
+// agree exactly, so a scene that never leaves the image would gate Clamp, Repeat
+// and Mirror as though they were the same function.
+//
+// The scales are exactly representable (9, 5) and the rotation is not, on purpose.
+// An exactly-representable transform cannot make NEAREST diverge even where every
+// pixel lands precisely on a texel boundary — an exact tie is not a disagreement,
+// both backends floor it the same way — so a scene built only from clean scales
+// would gate nearest vacuously and report it safe. The rotated node is where q is
+// irrational and the sampler is actually asked a hard question. The hazard's own
+// measurement is TestNearestDivergesAtATexelBoundary, which aims a boundary into
+// f32's blind spot; this scene is the ordinary case around it.
+func ImageScene(f paint.Filter, e paint.EdgeMode) *scene.Scene {
+	c := render.NewCanvas()
+	img := Checker(imageSrcW, imageSrcH)
+	img.Filter, img.Edge = f, e
+
+	c.FillColor(path.Rect(geom.RectXYWH(0, 0, W, H)), paint.FromRGBA8(250, 249, 246, 255))
+
+	c.Save()
+	c.Translate(14, 18)
+	c.Scale(9, 9)
+	c.Fill(path.Rect(geom.RectXYWH(-1.5, -1.5, 11, 11)), img, paint.NonZero)
+	c.Restore()
+
+	c.Save()
+	c.Translate(172, 60)
+	c.Rotate(math.Pi / 7)
+	c.Scale(5, 5)
+	c.Translate(-4, -4)
+	c.Fill(path.Circle(geom.Pt(4, 4), 7), img, paint.NonZero)
+	c.Restore()
+
+	c.Save()
+	c.Translate(90, 128)
+	c.Scale(4, 4)
+	c.Stroke(path.Circle(geom.Pt(4, 4), 7), img, paint.Stroke{Width: 2.5, Join: path.RoundJoin})
+	c.Restore()
+
+	return c.Scene()
+}
+
 func ManyNodes(w, h, cols, rows int) *scene.Scene {
 	c := render.NewCanvas()
 	c.FillColor(path.Rect(geom.RectXYWH(0, 0, float64(w), float64(h))), paint.FromRGBA8(20, 22, 28, 255))

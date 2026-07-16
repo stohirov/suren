@@ -1,13 +1,18 @@
 package gpu
 
 import (
+	"fmt"
 	"image"
 	"strconv"
 	"testing"
 
 	"github.com/cogentcore/webgpu/wgpu"
 	"github.com/stohirov/suren/backend/cpu"
+	"github.com/stohirov/suren/geom"
 	"github.com/stohirov/suren/internal/sample"
+	"github.com/stohirov/suren/paint"
+	"github.com/stohirov/suren/path"
+	"github.com/stohirov/suren/render"
 	"github.com/stohirov/suren/scene"
 )
 
@@ -29,7 +34,7 @@ func benchDispatch(b *testing.B, s *scene.Scene) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if err := r.ras.run(r.dev, r.target, r.segBuf, r.nodeBuf, r.tileOff, r.tileNode, r.stopBuf, r.tileSegOf, r.tileSegIx, r.clipsBuf, r.nx, r.ny); err != nil {
+		if err := r.ras.run(r.dev, r.target, r.segBuf, r.nodeBuf, r.tileOff, r.tileNode, r.stopBuf, r.tileSegOf, r.tileSegIx, r.clipsBuf, r.atlas, r.nx, r.ny); err != nil {
 			b.Fatal(err)
 		}
 		r.Sync()
@@ -195,7 +200,7 @@ func benchPresentPath(b *testing.B, blit bool) {
 	r.Sync()
 
 	dispatch := func() {
-		if err := r.ras.run(r.dev, r.target, r.segBuf, r.nodeBuf, r.tileOff, r.tileNode, r.stopBuf, r.tileSegOf, r.tileSegIx, r.clipsBuf, r.nx, r.ny); err != nil {
+		if err := r.ras.run(r.dev, r.target, r.segBuf, r.nodeBuf, r.tileOff, r.tileNode, r.stopBuf, r.tileSegOf, r.tileSegIx, r.clipsBuf, r.atlas, r.nx, r.ny); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -255,3 +260,33 @@ func benchPresentPath(b *testing.B, blit bool) {
 func BenchmarkPresentViaReadback(b *testing.B) { benchPresentPath(b, false) }
 
 func BenchmarkPresentViaBlit(b *testing.B) { benchPresentPath(b, true) }
+
+// BenchmarkEncodeImage prices what an image paint adds to a frame's encode, and
+// the number it exists to report is the ATLAS HASH.
+//
+// The frame fingerprint covers the texels (see fingerprint()), because a caller
+// that redraws into its image's Pix in place changes nothing else and would
+// otherwise get a skipped frame. That is correctness, not an option — but it means
+// hashing the whole atlas every frame, so the price belongs in a benchmark rather
+// than in a hopeful comment. The sweep is over image SIZE, since that is what the
+// hash is linear in; the alternative, keying the hash on a caller-supplied
+// generation counter, is only worth reaching for if these numbers say so.
+func BenchmarkEncodeImage(b *testing.B) {
+	for _, n := range []int{8, 64, 256, 512} {
+		b.Run(fmt.Sprintf("%dx%d", n, n), func(b *testing.B) {
+			img := sample.Checker(n, n)
+			img.Filter = paint.Bilinear
+			c := render.NewCanvas()
+			c.Fill(path.Rect(geom.RectXYWH(0, 0, float64(benchW), float64(benchH))), img, paint.NonZero)
+			s := c.Scene()
+			e := &Encoded{}
+			EncodeInto(e, s, benchW, benchH)
+			b.ReportMetric(float64(len(e.Atlas))/1024, "atlasKB")
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				EncodeInto(e, s, benchW, benchH)
+			}
+		})
+	}
+}

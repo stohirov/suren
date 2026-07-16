@@ -26,12 +26,15 @@ type Renderer struct {
 	tileSegOf *wgpu.Buffer
 	tileSegIx *wgpu.Buffer
 	clipsBuf  *wgpu.Buffer
+	atlas     *atlas
 	nx, ny    int
 
-	enc        *Encoded
-	lastFP     uint64
-	haveFrame  bool
-	dispatches int
+	enc         *Encoded
+	lastFP      uint64
+	haveFrame   bool
+	lastAtlasFP uint64
+	haveAtlas   bool
+	dispatches  int
 
 	fbCPU     *cpu.Renderer
 	fbImg     *image.RGBA
@@ -109,7 +112,7 @@ func (r *Renderer) Render(s *scene.Scene) error {
 	if err := r.upload(r.enc); err != nil {
 		return err
 	}
-	if err := r.ras.run(r.dev, r.target, r.segBuf, r.nodeBuf, r.tileOff, r.tileNode, r.stopBuf, r.tileSegOf, r.tileSegIx, r.clipsBuf, r.nx, r.ny); err != nil {
+	if err := r.ras.run(r.dev, r.target, r.segBuf, r.nodeBuf, r.tileOff, r.tileNode, r.stopBuf, r.tileSegOf, r.tileSegIx, r.clipsBuf, r.atlas, r.nx, r.ny); err != nil {
 		return err
 	}
 	if err := r.fallback(s); err != nil {
@@ -154,7 +157,7 @@ func (r *Renderer) upload(e *Encoded) error {
 	if err := r.storage(&r.clipsBuf, wgpu.ToBytes(e.Clips)); err != nil {
 		return err
 	}
-	return nil
+	return r.uploadAtlas(e)
 }
 
 const minBufSize = 32
@@ -193,6 +196,9 @@ func (r *Renderer) releaseBuffers() {
 			*b = nil
 		}
 	}
+	r.atlas.release()
+	r.atlas = nil
+	r.haveAtlas = false
 }
 
 func (r *Renderer) Release() {

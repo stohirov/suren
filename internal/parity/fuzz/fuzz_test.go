@@ -244,7 +244,7 @@ func TestGeneratorEmitsEveryPaintKind(t *testing.T) {
 	}
 	for kind, name := range map[PaintKind]string{
 		PaintSolid: "solid", PaintLinear: "linear", PaintRadial: "radial",
-		PaintConic: "conic", PaintMesh: "mesh",
+		PaintConic: "conic", PaintMesh: "mesh", PaintImage: "image",
 	} {
 		if seen[kind] == 0 {
 			t.Errorf("paint kind %s never generated over %d seeds; its path is outside the differential", name, seeds)
@@ -289,6 +289,49 @@ func TestGeneratorEmitsOnlyClosedConicGradients(t *testing.T) {
 		t.Fatalf("no conic gradient over %d seeds; randConic is unreachable and the closed-loop rule above is vacuous", seeds)
 	}
 	t.Logf("conic gradients generated: %d over %d seeds", conics, seeds)
+}
+
+// TestGeneratorEmitsOnlyBilinearImages is the same shape of rule as the conic one
+// above, aimed at the filter the plan did NOT expect to exclude.
+//
+// randImage emits Bilinear only. Nearest is a step function of the sample point, so
+// a pixel landing within f32's reach of a texel boundary reads a different texel on
+// each backend — Δ=255, both backends correct, no derivative to bound because the
+// magnitude is the texels' (backend/gpu's TestNearestDivergesAtATexelBoundary).
+// A generator that started emitting nearest would pass thousands of seeds and then
+// produce an unfixable flake, exactly as an open conic would.
+//
+// Both directions, for the reason the conic test states: an exclusion satisfied by
+// never generating an image at all would be vacuous. The edge modes are counted
+// too — they are total, so none of them is a hazard, but a generator that only ever
+// emitted Clamp would leave wrapIdx's two interesting branches untested while
+// looking fine.
+func TestGeneratorEmitsOnlyBilinearImages(t *testing.T) {
+	const seeds = 2000
+	images := 0
+	edges := map[paint.EdgeMode]int{}
+	for i := range seeds {
+		for j, n := range Generate(uint64(i) + 1).Nodes {
+			if n.Paint.Kind != PaintImage {
+				continue
+			}
+			images++
+			edges[n.Paint.Edge]++
+			if n.Paint.Filter != paint.Bilinear {
+				t.Fatalf("seed=0x%x node %d emitted a nearest-filtered image; a texel boundary is a discontinuity no differential gate can own",
+					i+1, j)
+			}
+		}
+	}
+	if images == 0 {
+		t.Fatalf("no image paint over %d seeds; randImage is unreachable and the bilinear-only rule above is vacuous", seeds)
+	}
+	for _, e := range []paint.EdgeMode{paint.Clamp, paint.Repeat, paint.Mirror} {
+		if edges[e] == 0 {
+			t.Errorf("edge mode %v never generated over %d seeds; its branch of wrapIdx is outside the differential", e, seeds)
+		}
+	}
+	t.Logf("image paints generated: %d over %d seeds; edge modes: %v", images, seeds, edges)
 }
 
 // The composite axis's counterpart to the ill-conditioned check above: it holds

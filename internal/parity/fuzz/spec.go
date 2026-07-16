@@ -109,6 +109,7 @@ const (
 	PaintRadial
 	PaintConic
 	PaintMesh
+	PaintImage
 )
 
 // PaintSpec carries every paint kind's parameters in one flat record. Stops does
@@ -128,6 +129,18 @@ type PaintSpec struct {
 	Cols   int          `json:"cols,omitempty"`
 	Rows   int          `json:"rows,omitempty"`
 	Stops  []paint.Stop `json:"stops,omitempty"`
+
+	// An image's TEXELS travel in the spec, base64 through encoding/json, rather
+	// than a rule for regenerating them. That is Phase 12c's spec-not-seed
+	// principle applied to pixels: a find stored as "8x8, procedural pattern 3"
+	// would silently become a different find the day the pattern function is
+	// edited, which is exactly how a seed retires. Pix is small (an 8x8 image is
+	// 256 bytes) and it is the thing that actually diverged.
+	ImgW   int            `json:"imgW,omitempty"`
+	ImgH   int            `json:"imgH,omitempty"`
+	Pix    []byte         `json:"pix,omitempty"`
+	Filter paint.Filter   `json:"filter,omitempty"`
+	Edge   paint.EdgeMode `json:"edge,omitempty"`
 }
 
 func (p PaintSpec) Paint() paint.Paint {
@@ -144,6 +157,8 @@ func (p PaintSpec) Paint() paint.Paint {
 			colors[i] = s.Color
 		}
 		return paint.MeshGrid(p.Rect, p.Cols, p.Rows, colors)
+	case PaintImage:
+		return paint.Image{W: p.ImgW, H: p.ImgH, Pix: p.Pix, Filter: p.Filter, Edge: p.Edge}
 	}
 	return paint.Solid{Color: p.Color}
 }
@@ -178,6 +193,19 @@ func (p PaintSpec) validate() error {
 		if want := (p.Cols + 1) * (p.Rows + 1); len(p.Stops) != want {
 			return fmt.Errorf("mesh %dx%d has %d vertex colours, need exactly %d", p.Cols, p.Rows, len(p.Stops), want)
 		}
+	case PaintImage:
+		// An invalid image is DROPPED by both backends rather than drawn, so a spec
+		// carrying one would render a node-less scene and gate nothing. Load accepts
+		// specs from disk and the shrinker rewrites them, so both reach this.
+		if !(paint.Image{W: p.ImgW, H: p.ImgH, Pix: p.Pix}).Valid() {
+			return fmt.Errorf("image %dx%d holds %d bytes, need %d", p.ImgW, p.ImgH, len(p.Pix), p.ImgW*p.ImgH*4)
+		}
+		if p.Filter != paint.Nearest && p.Filter != paint.Bilinear {
+			return fmt.Errorf("unknown filter %d", p.Filter)
+		}
+		if p.Edge != paint.Clamp && p.Edge != paint.Repeat && p.Edge != paint.Mirror {
+			return fmt.Errorf("unknown edge mode %d", p.Edge)
+		}
 	default:
 		return fmt.Errorf("unknown paint kind %d", p.Kind)
 	}
@@ -189,6 +217,13 @@ func (p PaintSpec) validate() error {
 func (p PaintSpec) solid() PaintSpec {
 	if p.Kind == PaintSolid {
 		return p
+	}
+	if p.Kind == PaintImage {
+		// An image has no stops to collapse to, and its texels are premultiplied, so
+		// there is no "first colour" to un-premultiply at alpha 0. The move only has
+		// to produce a node that still paints something: what it asks is whether the
+		// paint mattered at all, not whether THIS colour did.
+		return PaintSpec{Kind: PaintSolid, Color: paint.RGBA(0, 0, 0, 1)}
 	}
 	return PaintSpec{Kind: PaintSolid, Color: p.Stops[0].Color}
 }

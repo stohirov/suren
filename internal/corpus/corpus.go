@@ -178,6 +178,43 @@ func All() []Entry {
 			Tol:   parity.Quantized(),
 		})
 	}
+	// Image paints, every filter crossed with every edge mode (Phase 17). The
+	// cross is the point, not thoroughness for its own sake: filter and edge ride
+	// in the same packed flags word as the two compositing axes, so a wrong shift
+	// shows up only where both fields are non-zero. It is the composite-x-blend-*
+	// argument applied to a second pair of fields sharing a word.
+	//
+	// All six are Quantized, INCLUDING the nearest ones, and the reason differs
+	// between the two filters — which is the whole finding of the phase and is why
+	// they are not gated Identical even though nearest measures Δ=0 here.
+	//
+	// Bilinear earns the floor on its merits: the paint is continuous in the pixel
+	// position, so the f32-vs-f64 difference in the sample point stays sub-LSB, the
+	// way linear and radial gradients do. Nearest sits at Δ=0 on THIS scene as a
+	// fact about these transforms on this driver, not as a property. It is a step
+	// function, so a pixel whose sample point lands within f32's reach of a texel
+	// boundary can read a different texel on each backend and diverge by whatever
+	// those two texels differ by — see paint.ImageAt, and
+	// TestNearestDivergesAtATexelBoundary, which measures exactly that. Gating on
+	// the Δ=0 would be reading luck as a guarantee, the same call the composite-*
+	// entries make above.
+	for _, f := range []struct {
+		name string
+		f    paint.Filter
+	}{{"nearest", paint.Nearest}, {"bilinear", paint.Bilinear}} {
+		for _, e := range []struct {
+			name string
+			e    paint.EdgeMode
+		}{{"clamp", paint.Clamp}, {"repeat", paint.Repeat}, {"mirror", paint.Mirror}} {
+			entries = append(entries, Entry{
+				Name:  "image-" + f.name + "-" + e.name,
+				W:     sample.W,
+				H:     sample.H,
+				Build: func() *scene.Scene { return sample.ImageScene(f.f, e.e) },
+				Tol:   parity.Quantized(),
+			})
+		}
+	}
 	// Regressions are embedded at compile time, so a decode failure is a defect
 	// in the tree rather than a runtime condition a caller could handle. It
 	// panics rather than dropping the entry, because a fuzz find that silently

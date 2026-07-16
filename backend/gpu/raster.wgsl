@@ -37,6 +37,17 @@ const MESH_EPS: f32 = 1e-5;
 @group(0) @binding(8) var<storage, read> tileSegIdx: array<u32>;
 @group(0) @binding(9) var<storage, read> clips: array<ClipRec>;
 
+// A SAMPLED texture, and there is deliberately no sampler beside it. Filtering is
+// computed below from paint.Filter's definition, because a hardware sampler's
+// weight arithmetic is driver-defined and an implementation-defined rule cannot be
+// half of a parity contract — the same reason quant8 exists. textureLoad is an
+// exact fetch: an rgba8unorm texel arrives as exactly n/255, which is the number
+// paint.Image.Texel computes on the CPU.
+//
+// It is a texture rather than a ninth storage buffer because the eight above are
+// exactly WebGPU's default maxStorageBuffersPerShaderStage. See encode.go's Atlas.
+@group(0) @binding(10) var atlas: texture_2d<f32>;
+
 fn interpStops(start: u32, count: u32, t: f32) -> vec4<f32> {
   if (count == 0u) { return vec4<f32>(0.0); }
   let s0 = stops[start];
@@ -149,6 +160,87 @@ fn meshColor(nd: Node, px: f32, py: f32) -> vec4<f32> {
   // mesh's silhouette, and it is why a scene must extend its mesh past the path
   // it fills — see paint.MeshGradient.
   return vec4<f32>(0.0);
+}
+
+// Mirrors paint.imageCoordLimit: 2^24 is where f32 stops distinguishing adjacent
+// integers, so floor() past it has no meaning anyway, and below it the conversion
+// to i32 is exact and in range. The clamp is for DEFINEDNESS — an out-of-range
+// float-to-int conversion is unspecified here and undefined in Go — and wrapIdx
+// below is the actual guarantee: whatever integer arrives, the texel fetched is
+// inside the image.
+const IMG_COORD_LIMIT: f32 = 16777216.0;
+
+fn clampCoord(v: f32) -> f32 { return clamp(v, -IMG_COORD_LIMIT, IMG_COORD_LIMIT); }
+
+// wrapIdx is a verbatim port of paint.EdgeMode.Wrap. Integer arithmetic on both
+// sides, so the edge mode itself contributes nothing to the floor: every
+// divergence an image paint can have is in the index reaching this function.
+// WGSL's % on i32 is truncated like Go's, so the negative corrections port
+// unchanged.
+fn wrapIdx(i: i32, n: i32, mode: u32) -> i32 {
+  if (n <= 0) { return 0; }
+  if (mode == 1u) {
+    var k = i % n;
+    if (k < 0) { k = k + n; }
+    return k;
+  }
+  if (mode == 2u) {
+    let p = 2 * n;
+    var k = i % p;
+    if (k < 0) { k = k + p; }
+    if (k >= n) { return p - 1 - k; }
+    return k;
+  }
+  if (i < 0) { return 0; }
+  if (i >= n) { return n - 1; }
+  return i;
+}
+
+// texelAt mirrors paint.Image.Texel, plus the atlas origin the CPU does not have:
+// g0 is where this node's image was stacked into the shared texture, g1 its own
+// size. The wrap happens in IMAGE coordinates and the origin is added after, which
+// is what keeps a node from sampling its neighbour in the atlas — and why the
+// slack beside a narrower image is never read.
+fn texelAt(nd: Node, i: i32, j: i32, mode: u32) -> vec4<f32> {
+  let x = i32(nd.g0x) + wrapIdx(i, i32(nd.g1x), mode);
+  let y = i32(nd.g0y) + wrapIdx(j, i32(nd.g1y), mode);
+  return textureLoad(atlas, vec2<i32>(x, y), 0);
+}
+
+// lerpC is a + (b - a) * t, and it is written out rather than calling WGSL's
+// mix(). mix is e1*(1-e3) + e2*e3 — algebraically the same and a DIFFERENT
+// float expression, which is exactly the kind of substitution Phase 13's ordering
+// audit exists to catch. paint.lerp is the term order both sides state.
+fn lerpC(a: vec4<f32>, b: vec4<f32>, t: f32) -> vec4<f32> {
+  return a + (b - a) * t;
+}
+
+// imageColor is a verbatim port of paint.ImageAt — same term order, same half-texel
+// shift, same kernels. See that function for why Nearest is the ill-conditioned one
+// of the two filters and Bilinear is not, which is the reverse of what Phase 17
+// planned for.
+//
+// The texels are already premultiplied (paint.Image), so — unlike gradColor and
+// meshColor, which premultiply what they interpolate — there is nothing to do here
+// but return them. Bilinear averages premultiplied values, which is what makes an
+// alpha edge average correctly.
+fn imageColor(nd: Node, px: f32, py: f32) -> vec4<f32> {
+  let qx = nd.m0 * px + nd.m2 * py + nd.m4;
+  let qy = nd.m1 * px + nd.m3 * py + nd.m5;
+  let filt = (nd.flags >> 8u) & 0xFu;
+  let mode = (nd.flags >> 12u) & 0xFu;
+  if (filt == 1u) {
+    let u = clampCoord(qx - 0.5);
+    let v = clampCoord(qy - 0.5);
+    let i0 = i32(floor(u));
+    let j0 = i32(floor(v));
+    let fx = u - floor(u);
+    let fy = v - floor(v);
+    let top = lerpC(texelAt(nd, i0, j0, mode), texelAt(nd, i0 + 1, j0, mode), fx);
+    let bot = lerpC(texelAt(nd, i0, j0 + 1, mode), texelAt(nd, i0 + 1, j0 + 1, mode), fx);
+    return lerpC(top, bot, fy);
+  }
+  return texelAt(nd, i32(floor(clampCoord(qx))), i32(floor(clampCoord(qy))), mode);
 }
 
 fn coverage(wv: f32, rule: u32) -> f32 {
@@ -438,7 +530,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       let alpha = coverage(acc - ar[lx] * 0.5, nd.rule) * clipf[lx];
       if (alpha > 0.0) {
         var src = vec4<f32>(nd.cr, nd.cg, nd.cb, nd.ca);
-        if (nd.kind == 4u) {
+        if (nd.kind == 5u) {
+          src = imageColor(nd, f32(gx) + 0.5, f32(y) + 0.5);
+        } else if (nd.kind == 4u) {
           src = meshColor(nd, f32(gx) + 0.5, f32(y) + 0.5);
         } else if (nd.kind != 0u) {
           src = gradColor(nd, f32(gx) + 0.5, f32(y) + 0.5);

@@ -18,6 +18,7 @@ const (
 	PaintRadial
 	PaintConic
 	PaintMesh
+	PaintImage
 )
 
 type Segment struct {
@@ -99,9 +100,40 @@ type Encoded struct {
 	FallbackTiles []bool
 	NFallback     int
 
+	// Atlas is every image paint's texels in one rgba8unorm texture image,
+	// AtlasW x AtlasH, tight rows. Images are stacked vertically at x=0, so a
+	// node's atlas origin is (0, sum of the heights before it) and AtlasW is the
+	// widest image; the slack to the right of a narrower one is never sampled,
+	// because paint.EdgeMode.Wrap keeps every index inside the image's own extent
+	// before the origin is added.
+	//
+	// # Why one texture rather than the obvious storage buffer
+	//
+	// Uploading texels as u32 in a storage buffer would be simpler and it is not
+	// available: raster.wgsl already binds EIGHT storage buffers, which is exactly
+	// WebGPU's default maxStorageBuffersPerShaderStage, and device.go requests no
+	// raised limits. That is the same wall the mesh hit — see Stop, which
+	// generalized rather than take a ninth. A sampled texture is a different limit
+	// (maxSampledTexturesPerShaderStage, 16 by default), so it costs nothing that
+	// is scarce here.
+	//
+	// It is read with textureLoad and NO sampler, which is the correctness point
+	// and not an optimization: a hardware sampler's filtering is driver-defined, so
+	// binding one would put an implementation-defined rule inside the parity
+	// contract. See paint.Filter.
+	//
+	// AtlasFP is a hash of the texels alone, so a frame that changes geometry but
+	// not images can skip re-uploading them.
+	Atlas   []uint8
+	AtlasW  int
+	AtlasH  int
+	AtlasFP uint64
+
 	Fingerprint uint64
 
 	fallbackBBox [][4]float32
+	atlasSrc     []paint.Image
+	atlasSlots   map[atlasKey]int
 	flatScratch  []geom.Point
 	tileCursor   []uint32
 	rankCursor   []uint32
@@ -122,6 +154,9 @@ func EncodeInto(e *Encoded, s *scene.Scene, w, h int) {
 	e.Stops = e.Stops[:0]
 	e.Clips = e.Clips[:0]
 	e.fallbackBBox = e.fallbackBBox[:0]
+	e.atlasSrc = e.atlasSrc[:0]
+	clear(e.atlasSlots)
+	e.AtlasW, e.AtlasH = 0, 0
 	for _, n := range s.Nodes {
 		kind, ok := paintKind(n.Paint)
 		// An unsupported paint is dropped, which is only sound because the CPU
@@ -174,7 +209,39 @@ func EncodeInto(e *Encoded, s *scene.Scene, w, h int) {
 	e.NTilesY = (h + tileSize - 1) / tileSize
 	e.buildTiles()
 	e.markFallbackTiles()
+	e.buildAtlas()
 	e.Fingerprint = e.fingerprint()
+}
+
+// buildAtlas copies each image node's texels into one texture image. The nodes
+// already carry their atlas origins — fillPaint assigned them as it walked, since
+// a vertical stack's origin is just the running height — so this only moves bytes.
+func (e *Encoded) buildAtlas() {
+	e.AtlasFP = 0
+	if e.AtlasW <= 0 || e.AtlasH <= 0 {
+		e.Atlas = e.Atlas[:0]
+		return
+	}
+	n := e.AtlasW * e.AtlasH * 4
+	if cap(e.Atlas) < n {
+		e.Atlas = make([]uint8, n)
+	}
+	e.Atlas = e.Atlas[:n]
+	// The slack right of a narrow image is never sampled, so its contents cannot
+	// change a pixel — but they can change the FINGERPRINT, and stale bytes left in
+	// reused capacity would make an unchanged scene hash as changed and re-upload
+	// every frame. Clearing is what makes the hash a function of the scene.
+	clear(e.Atlas)
+	y := 0
+	for _, im := range e.atlasSrc {
+		row := im.W * 4
+		for j := range im.H {
+			dst := ((y+j)*e.AtlasW + 0) * 4
+			copy(e.Atlas[dst:dst+row], im.Pix[j*row:(j+1)*row])
+		}
+		y += im.H
+	}
+	e.AtlasFP = hashWords(offsetBasis, unsafe.Pointer(&e.Atlas[0]), len(e.Atlas))
 }
 
 // markFallbackTiles flags every tile a fallback node's bbox reaches, using the
@@ -201,8 +268,10 @@ func (e *Encoded) markFallbackTiles() {
 	}
 }
 
+const offsetBasis = uint64(14695981039346656037)
+
 func (e *Encoded) fingerprint() uint64 {
-	fp := uint64(14695981039346656037)
+	fp := offsetBasis
 	dims := [2]uint32{uint32(e.Width), uint32(e.Height)}
 	fp = hashWords(fp, unsafe.Pointer(&dims[0]), 8)
 	if len(e.Segments) > 0 {
@@ -220,6 +289,13 @@ func (e *Encoded) fingerprint() uint64 {
 	if len(e.FallbackTiles) > 0 {
 		fp = hashWords(fp, unsafe.Pointer(&e.FallbackTiles[0]), len(e.FallbackTiles))
 	}
+	// The texels, not just the atlas geometry. A node records where its image sits
+	// and how to sample it; nothing in Segments/Nodes/Stops records what is IN it.
+	// A caller that redraws into its image's Pix in place and re-renders would
+	// otherwise hash the frame identical and get last frame's pixels back — the
+	// same trap FallbackTiles closed one field up, and the reason this is folded in
+	// rather than assumed away by declaring Pix immutable.
+	fp = (fp ^ e.AtlasFP) * 1099511628211
 	return fp
 }
 
@@ -387,7 +463,59 @@ func (e *Encoded) fillPaint(nd *Node, kind PaintKind, n scene.Node) {
 		e.Stops = appendMeshVertices(e.Stops, g.Triangles)
 		nd.StopCount = uint32(len(e.Stops)) - nd.StopStart
 		nd.Minv = invMatrix(n.Transform)
+	// The image reuses the gradient geometry slots the same way conic did: G0 is
+	// the atlas origin, G1 the image's own size. Filter and edge mode ride in the
+	// flags word alongside the two compositing axes (see packFlags). So a paint
+	// with a texture behind it costs the Node struct nothing — which matters
+	// because that struct is hand-mirrored in WGSL and every field is a field in
+	// two places.
+	case paint.Image:
+		nd.G0 = [2]float32{0, float32(e.atlasSlot(g))}
+		nd.G1 = [2]float32{float32(g.W), float32(g.H)}
+		nd.Flags |= packSample(g.Filter, g.Edge)
+		nd.Minv = invMatrix(n.Transform)
 	}
+}
+
+// atlasKey identifies texels by the array holding them, not by their contents:
+// hashing the pixels to dedup would cost more than the copy it saves.
+type atlasKey struct {
+	data *uint8
+	w, h int
+}
+
+// atlasSlot returns the atlas row this image starts at, reusing a slot when the
+// same texels have already been placed this frame.
+//
+// Sharing one image across many nodes is the ORDINARY case — a sprite sheet, an
+// icon drawn in twenty places — and without this each node would get its own copy,
+// so a scene drawing one image N times would build and upload N times the texels.
+// That is a pathology rather than an inefficiency, which is why it is worth a map
+// here instead of a note in the roadmap.
+//
+// Two facts make the key sound. Within one EncodeInto the same pointer and
+// dimensions can only be the same bytes, so a shared slot can never be wrong. And
+// the key deliberately omits Filter and Edge: those ride in the node's flags word,
+// not in the atlas, so the same image sampled two different ways still shares one
+// slot. Distinct arrays holding identical texels get two slots, which costs memory
+// and cannot cost correctness.
+//
+// The map is retained and cleared per frame rather than rebuilt, keeping Phase 7b's
+// zero-allocation encode: clear() empties it without releasing its buckets.
+func (e *Encoded) atlasSlot(im paint.Image) int {
+	k := atlasKey{unsafe.SliceData(im.Pix), im.W, im.H}
+	if y, ok := e.atlasSlots[k]; ok {
+		return y
+	}
+	if e.atlasSlots == nil {
+		e.atlasSlots = make(map[atlasKey]int)
+	}
+	y := e.AtlasH
+	e.atlasSlots[k] = y
+	e.atlasSrc = append(e.atlasSrc, im)
+	e.AtlasW = max(e.AtlasW, im.W)
+	e.AtlasH += im.H
+	return y
 }
 
 func (e *Encoded) appendClips(nd *Node, clips []scene.ClipPath) {
@@ -408,8 +536,9 @@ func (e *Encoded) appendClips(nd *Node, clips []scene.ClipPath) {
 }
 
 func paintKind(p paint.Paint) (PaintKind, bool) {
-	switch p.(type) {
+	switch v := p.(type) {
 	case paint.Solid:
+		_ = v
 		return PaintSolid, true
 	case paint.LinearGradient:
 		return PaintLinear, true
@@ -419,6 +548,12 @@ func paintKind(p paint.Paint) (PaintKind, bool) {
 		return PaintConic, true
 	case paint.MeshGradient:
 		return PaintMesh, true
+	case paint.Image:
+		// An image whose Pix does not hold the texels W and H claim is dropped, and
+		// that agrees with the CPU reference by construction rather than by
+		// coincidence: backend/cpu's shader() drops the same node for the same
+		// reason. The encoder could not upload the missing texels in any case.
+		return PaintImage, v.Valid()
 	default:
 		return 0, false
 	}
@@ -505,15 +640,37 @@ func setClip(nd *Node, r *geom.Rect, w, h int) {
 	nd.HasClip = 1
 }
 
-// packFlags carries both compositing axes in one word: the blend mode in bits
-// 0-3, the Porter-Duff operator in bits 4-7. Each enum has 12 members and so
-// needs 4 bits; raster.wgsl's composite() unpacks with the same shifts.
+// The flags word's layout, stated once. Every field is 4 bits and every reader in
+// raster.wgsl unpacks with the same shift and the same 0xF mask:
 //
-// Packing rather than adding a field keeps the GPU Node at its current size and
+//	bits 0-3    paint.BlendMode      composite()
+//	bits 4-7    paint.CompositeOp    composite()
+//	bits 8-11   paint.Filter         imageColor()
+//	bits 12-15  paint.EdgeMode       imageColor()
+//
+// Packing rather than adding fields keeps the GPU Node at its current size and
 // layout, which is hand-mirrored in WGSL — a new field would have to be inserted
 // in both, in order, for two bits of payload.
+//
+// The masks are load-bearing and that is measured, not assumed: Phase 15 widened
+// the shader's blend mask from 0xF to 0xFF and every single-axis corpus entry
+// still passed, because a leaked bit lands past the end of a switch whose default
+// happens to be the zero value's behaviour. Only a scene exercising two axes at
+// once goes red. The image entries cross filter and edge with each other for the
+// same reason the composite-x-blend-* entries exist.
+const (
+	flagBlendShift  = 0
+	flagCompShift   = 4
+	flagFilterShift = 8
+	flagEdgeShift   = 12
+)
+
 func packFlags(op paint.BlendMode, comp paint.CompositeOp) uint32 {
-	return (uint32(op) & 0xF) | ((uint32(comp) & 0xF) << 4)
+	return ((uint32(op) & 0xF) << flagBlendShift) | ((uint32(comp) & 0xF) << flagCompShift)
+}
+
+func packSample(f paint.Filter, e paint.EdgeMode) uint32 {
+	return ((uint32(f) & 0xF) << flagFilterShift) | ((uint32(e) & 0xF) << flagEdgeShift)
 }
 
 func seg(a, b geom.Point) Segment {

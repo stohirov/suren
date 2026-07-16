@@ -66,9 +66,12 @@ func TestCorpusLossReportIsAudited(t *testing.T) {
 		"gradient-conic":      "conic paint",
 		"gradient-conic-seam": "conic paint",
 	}
-	// Composite scenes lose their operator; mesh scenes lose their paint. Both
-	// are matched by prefix because the corpus generates a family per operator.
-	lossyPrefix := []string{"composite-", "mesh", "gradient-mesh", "fallback-mesh"}
+	// Composite scenes lose their operator; mesh and image scenes lose their
+	// paint. All are matched by prefix because the corpus generates a family per
+	// operator, and per filter x edge mode. See the comment above paintName for
+	// why an image is a format limit rather than an omission — it is the one entry
+	// here that looks emittable.
+	lossyPrefix := []string{"composite-", "mesh", "gradient-mesh", "fallback-mesh", "image-"}
 
 	var lossy []string
 	for _, e := range corpus.All() {

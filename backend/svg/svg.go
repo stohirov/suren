@@ -74,6 +74,42 @@ func Encode(w io.Writer, s *scene.Scene, pxW, pxH int) (Report, error) {
 	return rep, err
 }
 
+// Why an image paint is a FORMAT LIMIT and not an omission (Phase 17).
+//
+// This one looks expressible, which is exactly why it gets a paragraph. SVG has
+// <pattern>, a pattern can hold an <image>, and CSS has image-rendering — so the
+// obvious reading is that a Repeat-mode image is "expressible and simply not
+// emitted", the class Phase 24 put mix-blend-mode in. That reading is wrong, and
+// checking it rather than asserting it is that phase's whole lesson.
+//
+// The load-bearing reason is the FILTER, and it disqualifies every image node
+// regardless of edge mode. This phase's entire correctness content is that the
+// kernel is pinned in shared code rather than delegated to a driver (see
+// paint.Filter). CSS Images 3 declines to pin it, in as many words:
+// image-rendering:auto is "UA-dependent"; smooth says only that "scaling
+// algorithms that 'smooth' colors are acceptable, such as bilinear interpolation"
+// — an example, not a mandate; crisp-edges "may be scaled using nearest neighbor
+// or any other UA-chosen algorithm"; and pixelated, the value that sounds like
+// Nearest, "allows minor smoothing as necessary". Not one of them names a
+// function. Emitting an image would hand the sampling back to the user agent —
+// the very thing the shader refuses to hand to a sampler.
+//
+// The edge modes fail independently, and the detail is worth recording: SVG's
+// <pattern> tiles "to infinity in X and Y" with no alternative, so Clamp and
+// Mirror have no counterpart. spreadMethod names exactly pad/reflect/repeat —
+// this paint's three edge modes, under other names — and it is a GRADIENT
+// attribute that patterns do not take. The vocabulary exists in the format and is
+// not available where it would be needed.
+//
+// So an emitted image would be a node that is present, plausible, and wrong,
+// which is the failure Phase 24 exists to remove rather than relabel. Reported and
+// dropped, beside conic and mesh.
+//
+// Note the coupling, which is the same shape as that phase's blend/composite
+// finding: Repeat alone IS tileable, so a per-row reading of this decision would
+// "fix" the repeat case and ship UA-defined filtering under it. The filter and the
+// edge mode are not independent rows.
+
 // paintName describes a paint the format cannot express, for the report.
 func paintName(p paint.Paint) string {
 	switch p.(type) {
@@ -81,6 +117,8 @@ func paintName(p paint.Paint) string {
 		return "conic paint"
 	case paint.MeshGradient:
 		return "mesh paint"
+	case paint.Image:
+		return "image paint"
 	default:
 		return fmt.Sprintf("paint %T", p)
 	}

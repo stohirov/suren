@@ -2,9 +2,8 @@ package gpu
 
 // Per-tile CPU fallback (Phase 14).
 //
-// Some features are not reachable at Δ≤1 on the GPU — hardware-filtered image
-// sampling, mesh-gradient patch interpolation. The alternative to this file is
-// widening the parity tolerance for every scene that contains one, which trades
+// Some features are not reachable at Δ≤1 on the GPU. The alternative to this file
+// is widening the parity tolerance for every scene that contains one, which trades
 // a whole frame's worth of guarantee for one node's inexactness. Instead the
 // encoder flags the tiles a fallback-marked node touches (encode.go), the CPU
 // reference rasterizes exactly those, and their pixels overwrite the GPU's
@@ -29,6 +28,27 @@ package gpu
 // composite of every node overlapping it, and the CPU pass cannot skip the
 // coverage sweep of a node that reaches a flagged tile even for the columns it
 // will not write. BenchmarkFallback reports it against the flagged tile count.
+//
+// # This file has never had the customer it was built for, and that is worth saying
+//
+// Phase 14 named two features it expected to need this: "hardware-filtered image
+// sampling, mesh-gradient patch interpolation". Both have since landed and NEITHER
+// does. Mesh sits at Δ=1 because a Gouraud triangle's inverse is a closed-form
+// solve rather than the Newton iteration the plan was imagining (Phase 16), and
+// image sampling is not hardware-filtered at all — the kernel is pinned in shared
+// code precisely so it is not a driver's opinion (Phase 17, paint.Filter).
+//
+// What Phase 17 DID find is a hazard this mechanism cannot fix either. Nearest
+// filtering diverges at a texel boundary by the full distance between two texels
+// (backend/gpu's TestNearestDivergesAtATexelBoundary), and falling back would buy
+// exactness at ~6µs/tile for a node that is usually the whole frame — worse than
+// simply rendering on the CPU, which is the misuse this file's price exists to
+// prevent. A discontinuity is a scene-level fact, not a tile-level one.
+//
+// So the mechanism stays gated, priced and mutation-tested against a synthetic
+// customer (a radial gradient marked by hand), and the honest status is that no
+// shipped feature has needed it yet. That is not an argument for deleting it — it
+// is the reason the price is written down where the next phase will read it.
 
 import (
 	"image"

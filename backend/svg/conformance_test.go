@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stohirov/suren/geom"
+	"github.com/stohirov/suren/internal/sample"
 	"github.com/stohirov/suren/paint"
 	"github.com/stohirov/suren/path"
 	"github.com/stohirov/suren/render"
@@ -217,6 +218,41 @@ func TestConicPaintIsReported(t *testing.T) {
 	}
 	if strings.Contains(got, "<path") {
 		t.Errorf("a dropped node must not leave a half-painted path behind:\n%s", got)
+	}
+}
+
+// TestImagePaintIsReported pins the Phase 17 decision recorded above paintName.
+// Unlike conic and mesh, this drop is not obviously right — SVG does have
+// <pattern> and <image> — so the test states which half of the reasoning it
+// guards: no CSS image-rendering value pins a filter kernel, so an emitted image
+// would hand the sampling to the user agent, and <pattern> only ever repeats, so
+// two of the three edge modes have nowhere to go.
+//
+// The subtest is the coupling. Repeat is the mode that IS tileable, and it must
+// drop too: a per-row fix would emit it and ship UA-defined filtering under a node
+// that looks correct, which trades a reported gap for an unreported wrong pixel.
+func TestImagePaintIsReported(t *testing.T) {
+	for _, e := range []struct {
+		name string
+		edge paint.EdgeMode
+	}{{"clamp", paint.Clamp}, {"repeat-is-tileable-and-still-drops", paint.Repeat}, {"mirror", paint.Mirror}} {
+		t.Run(e.name, func(t *testing.T) {
+			img := sample.Checker(4, 4)
+			img.Edge = e.edge
+			c := unit(t)
+			c.Fill(box(), img, paint.NonZero)
+			got, rep := encode(t, c, 10, 10)
+
+			if !rep.Lossy() {
+				t.Fatal("no image-rendering value pins a filter kernel and <pattern> only repeats; the drop is defensible but the silence is not")
+			}
+			if !strings.Contains(rep.Dropped[0].Feature, "image") {
+				t.Errorf("report must name the paint; got %q", rep.Dropped[0].Feature)
+			}
+			if strings.Contains(got, "<path") {
+				t.Errorf("a dropped node must not leave a half-painted path behind:\n%s", got)
+			}
+		})
 	}
 }
 
