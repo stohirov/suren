@@ -49,15 +49,34 @@ func NewRendererOn(b Backend, w, h int) (*Renderer, error) {
 	if err != nil {
 		return nil, err
 	}
-	t, err := newTarget(dev, w, h)
+	r, err := newRendererOnDevice(dev, w, h)
 	if err != nil {
 		dev.Release()
+		return nil, err
+	}
+	return r, nil
+}
+
+// newRendererOnDevice wraps a device the caller already acquired. Present (6b)
+// needs it: a surface must exist before RequestAdapter to filter for an adapter
+// that can actually present to it, so the device is built around the window
+// rather than the other way round.
+//
+// On success the renderer owns the device and Release releases it. On failure
+// the device is left untouched and the caller is still responsible for it —
+// this must not self-release. A device built for a surface has a surface
+// pointing at its instance, and Device.Release takes the instance down with it,
+// so releasing here would destroy the instance out from under a live surface
+// that only the caller can see. That ordering inversion is exactly what
+// Presenter.Release exists to prevent.
+func newRendererOnDevice(dev *Device, w, h int) (*Renderer, error) {
+	t, err := newTarget(dev, w, h)
+	if err != nil {
 		return nil, err
 	}
 	ras, err := newRasterizer(dev, w, h)
 	if err != nil {
 		t.release()
-		dev.Release()
 		return nil, err
 	}
 	return &Renderer{dev: dev, w: w, h: h, target: t, ras: ras, enc: &Encoded{}}, nil

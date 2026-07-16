@@ -1,2 +1,4 @@
 github.com/cogentcore/webgpu v0.23.0 h1:hrjnnuDZAPSRsqBjQAsJOyg2COGztIkBbxL87r0Q9KE=
 github.com/cogentcore/webgpu v0.23.0/go.mod h1:ciqaxChrmRRMU1SnI5OE12Cn3QWvOKO+e5nSy+N9S1o=
+github.com/go-gl/glfw/v3.3/glfw v0.0.0-20260707082822-2a407d02d01a h1:hSqNjNllNZUIiqXiS7zFJFqqPa4VPqrzMcWws1dz/VE=
+github.com/go-gl/glfw/v3.3/glfw v0.0.0-20260707082822-2a407d02d01a/go.mod h1:SyRD8YfuKk+ZXlDqYiqe1qMSqjNgtHzBTG810KUagMc=

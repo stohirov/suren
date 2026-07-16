@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/cogentcore/webgpu/wgpu"
 	"github.com/stohirov/suren/backend/cpu"
 	"github.com/stohirov/suren/internal/sample"
 	"github.com/stohirov/suren/scene"
@@ -166,3 +167,91 @@ func BenchmarkGPUManyNodes(b *testing.B) {
 		r.Sync()
 	}
 }
+
+// The pair below prices what 6b removes, and prices it headlessly so the answer
+// does not depend on which window had focus. Each runs the same dispatch on the
+// same scene and size, then differs only in how the finished frame reaches a
+// display:
+//
+//   - Readback is 6a's bridge: Sync, then pull the whole frame across the bus
+//     into an image.RGBA for the window library to upload again.
+//   - Blit is 6b: one render pass into a texture of the surface's own format.
+//     A real swapchain image differs only in who allocated it, so this is the
+//     present cost with the acquire/Present pacing left out.
+//
+// The window numbers from the demo cannot answer this: vsync pins them to the
+// display, and macOS throttles an unfocused window, which is exactly the
+// condition a backgrounded benchmark run would be measuring.
+func benchPresentPath(b *testing.B, blit bool) {
+	r, err := NewRenderer(benchW, benchH)
+	if err != nil {
+		b.Skipf("no gpu device: %v", err)
+	}
+	defer r.Release()
+
+	if err := r.Render(sample.ManyNodes(benchW, benchH, 40, 24)); err != nil {
+		b.Fatal(err)
+	}
+	r.Sync()
+
+	dispatch := func() {
+		if err := r.ras.run(r.dev, r.target, r.segBuf, r.nodeBuf, r.tileOff, r.tileNode, r.stopBuf, r.tileSegOf, r.tileSegIx, r.clipsBuf, r.nx, r.ny); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	if !blit {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			dispatch()
+			// No Sync() first, though window.RunGPU's frame does exactly that:
+			// ReadRGBA already polls until its map completes, which cannot
+			// happen before the dispatch and the copy have. Syncing first only
+			// adds a second full stall, and charging that to "readback" would
+			// be beating 6a's approach by benchmarking 6a's redundancy.
+			if _, err := r.ReadRGBA(); err != nil {
+				b.Fatal(err)
+			}
+		}
+		return
+	}
+
+	const format = wgpu.TextureFormatBGRA8Unorm
+	dst, err := r.dev.device.CreateTexture(&wgpu.TextureDescriptor{
+		Usage:         wgpu.TextureUsageRenderAttachment,
+		Dimension:     wgpu.TextureDimension2D,
+		Size:          wgpu.Extent3D{Width: benchW, Height: benchH, DepthOrArrayLayers: 1},
+		Format:        format,
+		MipLevelCount: 1,
+		SampleCount:   1,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer dst.Release()
+	view, err := dst.CreateView(nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer view.Release()
+	bl, err := newBlitter(r.dev, format)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer bl.release()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		dispatch()
+		if err := bl.draw(r.dev, r.target.view, view); err != nil {
+			b.Fatal(err)
+		}
+		r.Sync()
+	}
+}
+
+func BenchmarkPresentViaReadback(b *testing.B) { benchPresentPath(b, false) }
+
+func BenchmarkPresentViaBlit(b *testing.B) { benchPresentPath(b, true) }

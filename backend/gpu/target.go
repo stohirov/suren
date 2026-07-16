@@ -16,8 +16,11 @@ type target struct {
 }
 
 func newTarget(d *Device, w, h int) (*target, error) {
+	// TextureBinding is for 6b's blit: swapchain images are RenderAttachment and
+	// never storage-writable, so the compute pass keeps writing here and a render
+	// pass samples this texture into the surface. Costs nothing when unused.
 	tex, err := d.device.CreateTexture(&wgpu.TextureDescriptor{
-		Usage:         wgpu.TextureUsageStorageBinding | wgpu.TextureUsageCopySrc | wgpu.TextureUsageCopyDst,
+		Usage:         wgpu.TextureUsageStorageBinding | wgpu.TextureUsageTextureBinding | wgpu.TextureUsageCopySrc | wgpu.TextureUsageCopyDst,
 		Dimension:     wgpu.TextureDimension2D,
 		Size:          wgpu.Extent3D{Width: uint32(w), Height: uint32(h), DepthOrArrayLayers: 1},
 		Format:        wgpu.TextureFormatRGBA8Unorm,

@@ -53,12 +53,13 @@ split, not by convention.
 
 | Package | Files | Purpose |
 |---|---|---|
-| `backend/gpu` | `device.go` `encode.go` `renderer.go` `raster.go` `raster.wgsl` `target.go` `fallback.go` | The WebGPU compute renderer. |
+| `backend/gpu` | `device.go` `encode.go` `renderer.go` `raster.go` `raster.wgsl` `target.go` `fallback.go` `blit.go` `blit.wgsl` `present.go` | The WebGPU compute renderer, plus native windowed present. |
 | `backend/window` | `window.go` | `Run` (CPU) / `RunGPU` (GPU via readback bridge). |
 
 Inside `backend/gpu`:
 
 - `device.go` — wgpu instance/adapter/device/queue lifecycle. `NewDeviceOn(Backend)` selects a named backend and **verifies the adapter's reported backend matches the request** (see correctness.md — the obvious API silently lies).
+- `blit.go` + `blit.wgsl` — moves the finished target onto a surface-format texture, and picks the surface format and present mode. Deliberately **outside** the `gpupresent` tag: a swapchain image is just a texture, so pointing the real blitter at an offscreen one of the same format tests the whole pixel path headlessly (Δ=0). Only `present.go`'s window plumbing needs a display.
 - `encode.go` — scene → flat GPU buffers + tile bins. Pure Go, unit-testable without a GPU. The largest file and the one that holds the tile model.
 - `renderer.go` — the frame: encode → fingerprint → upload → dispatch → fallback. Owns buffer reuse.
 - `raster.go` — compute pipeline, bind groups, dispatch.
@@ -166,11 +167,14 @@ scene.Scene
          │    Before any readback or present, so offscreen and windowed
          │    paths both see patched pixels. ~6µs/tile — see correctness.md.
          ▼
-    target texture (rgba8unorm storage)
+    target texture (rgba8unorm storage + TextureBinding)
          │
          ├─ ReadRGBA()   → align256 → *image.RGBA     (offscreen, tests, PNG)
-         └─ Phase 6a bridge: readback → screen.WritePixels    (window today)
-            Phase 6b native surface present: NOT BUILT. ⏳
+         ├─ Phase 6a bridge: readback → screen.WritePixels    (window.RunGPU)
+         └─ Phase 6b present: blit render pass → swapchain image  (gpu.RunPresent)
+              blit.go + blit.wgsl — fullscreen triangle, textureLoad 1:1.
+              Swapchain images are RenderAttachment, never storage-writable,
+              so the frame cannot be computed into the surface directly.
 ```
 
 Two notes on the shape:
@@ -180,8 +184,14 @@ Two notes on the shape:
   quantized differently. A tile is a complete composite of the scene restricted to
   its area, so wholesale replacement cannot leave a seam. Why it is a tile and not
   a node.
-- **The readback in the window path is temporary and known.** GPU → CPU → GPU per
-  frame. Phase 6b removes it; it has not been written.
+- **The readback is Ebiten's price, and only `window.RunGPU` still pays it.** That path
+  hands pixels to a loop that wants CPU memory, so the frame makes a GPU → CPU → GPU
+  round trip. Phase 6b's `gpu.RunPresent` keeps the frame on the GPU and blits it to a
+  surface: **~0.4 ms and 3.69 MB per frame** cheaper (1280×720, `BenchmarkPresentVia*`).
+  The allocation is the headline, not the time — on Apple silicon the readback crosses no
+  bus, only unified memory, so "GPU → CPU → GPU" costs far less than it sounds. 6a is kept
+  because it is the CPU-vs-GPU comparison harness, not because it is how to put pixels on
+  screen.
 
 ## The tile model
 
@@ -264,6 +274,7 @@ that has never been run on to fail.
 | `backend/png` | `png.Encode(w, s, pxW, pxH) error` | `cpu.Render` + stdlib PNG. |
 | `backend/svg` | `svg.Encode(w, s, pxW, pxH) error` | Vector output. **Silently drops several features** — see below. |
 | `backend/gpu` | `gpu.NewRenderer(w, h)`, `gpu.NewRendererOn(backend, w, h)` | WebGPU compute. `Render` / `Sync` / `ReadRGBA` / `Resize` / `Release`. |
+| `backend/gpu` (present) | `gpu.RunPresent(title, w, h, frame)`, `gpu.NewPresenterWith(...)` | Native surface, no readback. `-tags gpupresent` only. Read `Format` / `PresentMode` rather than assuming either. |
 | `backend/window` | `window.Run(title, w, h, frame)`, `window.RunGPU(...)` | Ebiten loop. `RunGPU` goes through the readback bridge. |
 
 **The SVG backend's gaps are silent, and that is a known wart.** Read from
@@ -322,5 +333,6 @@ The roadmap's own list, which is the fastest orientation for a change:
 | `backend/gpu/raster.wgsl` | The fine rasterizer (per-tile lists, blend/clip/paint). |
 | `backend/gpu/renderer.go` | Encode → upload → dispatch (`Resize`, buffer reuse). |
 | `backend/gpu/target.go` | Offscreen texture + readback (`resize`). |
-| `backend/gpu/present.go` | Phase 6b — glfw surface + blit present, `gpupresent` build tag. **Does not exist yet.** |
-| `backend/window/window.go` | Window loop; `Run` (CPU) and `RunGPU`. |
+| `backend/gpu/blit.go` + `blit.wgsl` | Target → surface blit; format and present-mode choice. Untagged, so CI gates it. |
+| `backend/gpu/present.go` | Phase 6b — glfw window + surface + present loop, `gpupresent` build tag. |
+| `backend/window/window.go` | Window loop; `Run` (CPU) and `RunGPU` (readback bridge). |

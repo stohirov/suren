@@ -16,10 +16,9 @@
 > mesh crack, where the CPU reference was the buggy backend, is the clearest —
 > and those are the most useful entries in the file.
 >
-> **⏳ means not done.** Phase 6b (native surface present), Phases 17–22, and
-> 12d's non-Apple coverage are unbuilt or unrun. The register throughout is
-> deliberate: where this project has not verified something, it says so rather
-> than passing quietly.
+> **⏳ means not done.** Phases 17–22 and 12d's non-Apple coverage are unbuilt or
+> unrun. The register throughout is deliberate: where this project has not
+> verified something, it says so rather than passing quietly.
 >
 > Reading order for a newcomer: [README](../README.md) →
 > [architecture](architecture.md) → [correctness](correctness.md) → this file.
@@ -161,14 +160,14 @@ each, the parity/roundtrip tests stay the safety net that let every prior rewrit
 
 ```
 Phase 6 (present) ─┬─ needs 6a target/rasterizer Resize ──► reused by 7a buffer reuse
-                   └─ 6b native surface (on-device only)
+                   └─ 6b native surface (blit tested headless; window on-device)
 Phase 7 (frame cost) ── independent of 6, but makes 6 worth watching (fast frames)
 Phase 8 (coarse lists) ── needs Phase 7's EncodeInto scratch reuse to stay cheap
 Phase 9 (GPU flatten/stroke) ── gated on Phase 8 diagnosis: only if CPU encode dominates
 Phase 10 (feature parity: blend modes, path clips) ── touches BOTH cpu + gpu + wgsl
 ```
 
-## Phase 6 — windowed present (real-time on screen)  ⏳ in progress
+## Phase 6 — windowed present (real-time on screen)  ✅
 
 The whole motivation was the CPU window's ~14 ms/frame. The GPU renders offscreen today;
 this phase puts it on a live surface. Ship in two steps so a regression is visible early.
@@ -190,26 +189,138 @@ this phase puts it on a live surface. Ship in two steps so a regression is visib
 **Result:** GPU renderer drives a window via the readback bridge; CPU/GPU backends produce
 matching pixels through the exact `frame`/`resize` code the loop calls. Live per-frame
 comparison and the display itself are on-device (the sandbox has no GL context). Accepts
-one GPU→CPU→GPU roundtrip — removed in 6b.
+one GPU→CPU→GPU roundtrip — removed in 6b, where it was priced at **~0.4 ms and 3.69 MB per
+frame** on unified memory (1280×720; `BenchmarkPresentViaReadback` vs `ViaBlit`). Smaller
+than this phase assumed; see 6b for why, and for the benchmark bug that first said 2.5 ms.
 
-### 6b — native wgpu surface present (`present.go`, on-device)
+### 6b — native wgpu surface present (`present.go`, on-device)  ✅
 
-- [ ] glfw window + `wgpu.Surface`; configure a swapchain (surface format is typically
-      `BGRA8UnormSrgb` — record it, don't assume RGBA). Quarantine glfw behind a build tag
-      (`//go:build gpupresent`) so the default/headless build and CI test binary never link
-      a display library.
-- [ ] The compute shader writes a `storage<rgba8unorm, write>` texture; swapchain images
+- [x] glfw window + `wgpu.Surface`, quarantined behind `//go:build gpupresent`. Verified
+      rather than asserted: `go list -deps -test ./...` links **0** glfw packages untagged
+      and 2 tagged, so the default build and the CI test binary carry no display library.
+- [x] The compute shader writes a `storage<rgba8unorm, write>` texture; swapchain images
       are `RenderAttachment`, **not** storage-writable. So: compute into the offscreen
-      target as today, then a tiny fullscreen-triangle **blit pipeline** (sample offscreen
-      tex → surface, handling the RGBA→BGRA/sRGB format difference) writes the frame. This
-      blit is the new bit; the raster path is unchanged.
-- [ ] Present loop: acquire next surface texture → dispatch compute → blit render pass →
-      present; on resize, reconfigure the surface **and** call `target.resize` from 6a.
-- [ ] Manual on-device validation (sandbox/CI have no display): render the sample scene to
-      a real window, screenshot, eyeball against the offscreen PNG.
+      target as today, then a fullscreen-triangle **blit pipeline** writes the frame.
+      `target` gained `TextureBinding` so the blit can read it.
+- [x] Present loop: acquire → dispatch → blit render pass → present; on resize, reconfigure
+      the surface **and** call `target.resize` from 6a. A failed acquire (invalidated
+      swapchain) reconfigures and drops the frame rather than erroring.
+- [x] The surface is created **before** `RequestAdapter` and passed as `CompatibleSurface`,
+      so the adapter is filtered for one that can actually present to this window
+      (`newDeviceForSurface`). `NewDeviceOn` cannot do this — it has no window to bind —
+      hence `newRendererOnDevice`.
+- [x] Teardown is ordered and single-path. The first cut released the renderer before the
+      surface, which was wrong: `Renderer.Release` bundles queue+device+adapter+**instance**,
+      so it took the instance out from under a live surface. `Presenter.Release` now goes
+      blit → surface → device → window → `glfw.Terminate`, tolerates a half-built Presenter
+      (every constructor error path calls it), and is proven to run — `-frames N` closes the
+      window from inside the loop, and both demo modes exit 0 through it with no validation
+      error. Killing a window can never test an unwind.
 
-**Done when:** the sample scene presents directly from GPU memory with no readback, on
-darwin/arm64 (Metal). CI still gates on the offscreen parity tests, not the window.
+**Measured (Apple M4, Metal, darwin/arm64):** `surface format=bgra8unorm present=immediate
+framebuffer=1280x960 scale=2x`. The sample scene and the animated scene both present with
+no readback.
+
+**The format prediction was wrong, and in the useful direction.** This plan said the surface
+format "is typically `BGRA8UnormSrgb`" and budgeted a shader conversion for it. The M4's
+surface offers plain **`bgra8unorm`**, so `pickFormat` takes it and the blit is an exact
+passthrough — no sRGB conversion runs on this host at all. Two things follow. The channel
+half of "RGBA→BGRA" was never work either: BGRA8Unorm is a *memory* layout, and a fragment
+shader still writes `.r` to red, so the swizzle is the hardware's and only surfaces when
+reading bytes back as an `image.RGBA`. And the sRGB half is a real path that this machine
+cannot exercise — which is why it is tested rather than trusted (below).
+
+**Δ=0, not "eyeball it".** This phase planned to validate by screenshotting a window and
+comparing against the offscreen PNG by eye. That step was replaced by a stronger one and the
+plan was wrong to accept it. A swapchain image is a texture; pointed at an offscreen texture
+*of the surface's own format*, the real blitter is exercised headlessly, and
+`TestBlitToUnormSurfaceIsExact` gates it at **Δ=0** against the very target the PNG comes
+from — the triangle covers the frame, the fetch does not shift or flip it, the format is
+handled. So the blit lives in `blit.go`, **outside** the tag; only the window plumbing is
+behind it. Behind the tag it would have been the one new thing in the pixel path that CI
+could never run.
+
+The sRGB path is gated the same way even though no local surface uses it:
+`TestBlitToSRGBSurfaceRoundTrips` measures **Δ=0** but holds the gate at the quantization
+floor (Δ≤1) — it crosses a float pipeline (a WGSL `pow` against the driver's own encode),
+which is precisely the contract's stated case for the floor; pinning it to 0 would pin
+Metal's `pow`, not the round trip. And because a passing test proves nothing if the bug it
+guards is invisible, `TestSRGBSurfaceWouldWashOutWithoutLinearize` forces the passthrough
+shader into an sRGB surface and asserts it **fails**: the double encode moves **73/255** at
+its worst, over 30,830 channels. Without that, the linearize could have been a no-op.
+
+**Retina forced a decision 6a never faced.** `GetFramebufferSize` is 2× `GetSize` here, and
+the blit is 1:1. Rendering at *point* size would have filled a quarter of the window. So the
+renderer draws at framebuffer resolution and `RunPresent` pre-scales the canvas by the
+content scale — which is also just the right answer for a GPU rasterizer.
+
+**What the roundtrip cost — and the first answer was ~6× too good** (1280×720, `ManyNodes`,
+headless, `-benchtime 1000x`, 5 runs):
+
+| present path | ns/op (range) | B/op |
+|---|---:|---:|
+| dispatch only (`BenchmarkGPUDispatchManyNodes`) | 1.79–2.21 ms | — |
+| via readback — 6a's approach (`BenchmarkPresentViaReadback`) | **2.56–3.14 ms** | **3,687,779** |
+| via blit — 6b (`BenchmarkPresentViaBlit`) | **2.23–2.53 ms** | **1,136** |
+
+The blit saves roughly **0.4 ms/frame** and the whole 3.69 MB. Not 2.5 ms — which is what
+this section claimed until the benchmark was corrected, and the correction is the entry
+worth keeping.
+
+**The bug was in the benchmark, and it flattered us.** The readback loop was written as
+`dispatch → Sync → ReadRGBA`, mirroring `window.RunGPU`'s frame verbatim. But `ReadRGBA`
+already polls until its map completes, which cannot happen before the dispatch and the copy
+have — so the leading `Sync` is a *second* full stall, and the blit path only ever paid one.
+That redundant stall, not the readback, was most of the "2× faster" result. Copying the
+production code into the benchmark felt like fidelity and was actually a rigged comparison:
+6a's redundancy is a bug in 6a, not a cost of readback, and beating it proves nothing.
+Priced against a readback that syncs once, the win is ~15%.
+
+**Why so small: this machine has no bus to cross.** The framing throughout Phase 6 was
+"GPU → CPU → GPU per frame", which reads as a PCIe transfer. On Apple silicon memory is
+unified, so the readback is a shared-memory copy plus a map round trip — real, but nothing
+like the cost the phrase implies. On a discrete GPU the same benchmark should separate much
+further, and **this project has no discrete GPU to check that on** (12d's standing limit),
+so the claim is scoped to unified memory and no further.
+
+**What is unambiguous is the allocation:** 3,687,779 → 1,136 B/op. That figure is exactly
+1280×720×4 — the frame itself landing on the Go heap every frame, hitting the collector,
+and it is simply gone. Note also what neither number includes: `window.RunGPU` then hands
+those bytes to `screen.WritePixels`, which uploads them *back* to the GPU. The benchmark
+prices the GPU→CPU leg only, so it understates the full bridge — but the fix for that is to
+measure it, not to assume it.
+
+**The window's own fps could not answer that**, which is why the benchmark exists. Under
+vsync the demo reports 8.33 ms / 120.0 fps — 1/120 to three digits, i.e. the *display*, not
+the renderer; a renderer 6× faster would print the same number. `Options.Unsynced` picks
+`Immediate` and the same scene runs **~1.3–1.5 ms/frame (~650–770 fps)** at 1280×960. Even
+that is only indicative: macOS throttles an unfocused window, and the first attempt to
+compare 6a's bridge this way produced 9.4 fps from a backgrounded Ebiten window. Hence the
+headless pair above, and hence `PresentMode()` is exported — a frame rate read without
+checking it is a claim about the monitor.
+
+**Known gaps, carried deliberately:**
+
+- **A failed acquire cannot be detected** with cogentcore/webgpu v0.23.0 — it drops
+  `WGPUSurfaceTexture.status` and hands back a NULL texture with a nil error, which
+  `CreateView` would turn into a process abort. `Frame` refuses to acquire from a minimised
+  window, which removes the reachable trigger; the residual (a >1s stall under load) needs
+  an upstream fix. See the risk register.
+- **Live resize on macOS draws nothing.** The drag runs a nested Cocoa run loop, so
+  `PollEvents` does not return until it ends; the documented answer is a window-refresh
+  callback, which this does not register. The window snaps to the new size on release.
+- **A resized window does not rescale the scene** under `RunPresent` — the callback is
+  handed a canvas and never learns the new size, so the scene keeps its authored extent.
+  Same as `window.Run`. Drive a `Presenter` directly and read `Size()` to follow the window.
+- **The blit rebuilds its bind group every frame** (~57 allocs/op), as `rasterizer.run`
+  does. Consistent with the existing code and not on the measured critical path; Phase 7's
+  argument for caching applies here whenever it is worth making.
+
+**Done:** the sample scene presents directly from GPU memory with no readback on
+darwin/arm64 (Metal). CI gates the blit at Δ=0 offscreen; the window itself stays on-device.
+Untested elsewhere: no Vulkan/DX12 host was available (12d's standing limit), so the sRGB
+blit and any non-`bgra8unorm` surface remain covered by test, not by hardware — and the
+present-path benchmark's answer is a unified-memory answer only.
 
 ## Phase 7 — kill per-frame cost (buffer reuse for static & animated scenes)  ✅
 
@@ -384,11 +495,16 @@ These are engine features the CPU side also lacks or only partially has; each mu
       parity unchanged (Δ=0). Nesting verified as `fill ∩ A ∩ B`.
 - [ ] *Deferred:* per-tile clip segment lists (only if a complex clip path is slow); CPU mask
       caching across nodes that share a clip stack; SVG backend still ignores path clips.
-- [ ] **Colorspace / sRGB correctness** once 6b introduces an sRGB surface: confirm the
-      linear-premultiplied compositing still matches the CPU `image.RGBA` path end to end.
+- [ ] **Colorspace / sRGB correctness.** This was gated on "once 6b introduces an sRGB
+      surface", and 6b did not: the M4's surface offers `bgra8unorm`, so `pickFormat` takes
+      the non-sRGB format and the blit is a passthrough that never converts. The item is
+      therefore **not** unblocked by 6b and is not answered by it — it is still Phase 19's,
+      and it is now the *encoding in the target itself* that is in question, not the
+      surface's. 6b only pinned down what the blit does with whatever the target holds.
 
 **Done when:** each feature renders identically (within tolerance) on CPU and GPU via a
-dedicated parity scene. (Blend modes ✅; path clips ✅; sRGB remains, gated on 6b.)
+dedicated parity scene. (Blend modes ✅; path clips ✅; sRGB remains, and 6b did not gate
+it after all — see Phase 19.)
 
 ## Cross-cutting (fold into the phases above, not standalone work)
 
@@ -420,8 +536,11 @@ dedicated parity scene. (Blend modes ✅; path clips ✅; sRGB remains, gated on
 - **Encoder unit tests** (pure Go, no GPU): node/segment/stop counts, kinds, bbox,
   clip flags, tile-bin structure; extend to per-tile segment ranges + backdrops in Phase 8.
 - **Headless GPU roundtrip** (`TestDeviceInit`, offscreen render + readback) so the
-  full pipeline is exercised without a display. Stays the CI gate — windowed present (6b)
-  is validated manually on-device only.
+  full pipeline is exercised without a display. Stays the CI gate. 6b shrank what "on-device
+  only" covers: a swapchain image is just a texture, so the blit is gated headlessly against
+  one of the surface's own format (`TestBlitToUnormSurfaceIsExact`, Δ=0), and only the
+  acquire/Present pacing is left to manual validation. When something is display-only, the
+  question worth asking is which part actually is.
 - **Per-backend reconciliation** (`TestReconcileBackends`, Phase 12d) runs the corpus on each
   native backend the host exposes and reports the ones it could not. On Apple silicon that is
   Metal alone, so a green `go test` proves Metal parity and explicitly disclaims the rest.
@@ -434,13 +553,16 @@ dedicated parity scene. (Blend modes ✅; path clips ✅; sRGB remains, gated on
 |---|---|
 | Exact coverage on GPU diverges from CPU | port the algorithm verbatim; per-tile backdrop; raw-RGBA parity test on every stage |
 | cgo/native dep won't build or run headless | spiked before committing — Metal device confirmed headless; dep quarantined in its own module |
-| No display in CI/sandbox | validate offscreen (readback); windowed present is on-device only |
+| No display in CI/sandbox | validate offscreen (readback); windowed present is on-device only. 6b narrowed this: the blit is tested headlessly against a texture of the surface's format (Δ=0), so only acquire/Present is display-only |
 | Tiling breaks winding across tile edges | backdrop routing + clip-across-tiles parity test |
 | Per-frame encode becomes the bottleneck | measured (~22%); Phase 7 buffer/scratch reuse, Phase 9 GPU flattening |
 | Huge many-segment path × many tiles (backdrop re-iteration) | acceptable now; Phase 8 coarse per-tile segment lists |
-| Swapchain image not storage-writable (can't compute into surface) | Phase 6b computes offscreen then blits via a fullscreen render pass |
-| Surface format is BGRA/sRGB, not linear RGBA | record the surface format; the blit shader handles the conversion; verify colorspace parity (Phase 10) |
-| glfw drags a display dep into headless builds/CI | quarantine behind `//go:build gpupresent`; default build and test binary never link it |
+| Swapchain image not storage-writable (can't compute into surface) | ✅ 6b computes offscreen then blits via a fullscreen render pass |
+| Surface format is BGRA/sRGB, not linear RGBA | ✅ measured, not assumed: Metal offers `bgra8unorm` and `pickFormat` prefers non-sRGB, making the blit a passthrough (Δ=0). The sRGB path exists and is tested, plus a guard asserting the un-linearized version *fails*; no local surface exercises it |
+| glfw drags a display dep into headless builds/CI | ✅ quarantined behind `//go:build gpupresent`; `go list -deps -test` confirms 0 glfw packages untagged |
+| A window's fps measures the display, not the renderer | vsync pins it to the refresh exactly (8.33 ms / 120.0 fps) and macOS throttles unfocused windows; price present paths with the headless `BenchmarkPresentVia*` pair, and read `PresentMode()` before quoting any fps |
+| **A failed surface acquire is unreportable by this binding** | ⚠️ **open, upstream.** wgpu signals Timeout/Outdated/Lost via `WGPUSurfaceTexture.status`; cogentcore/webgpu v0.23.0's shim returns only `ref.texture` and discards it, and its error scope only catches Validation errors — so a failed acquire arrives as (NULL handle, nil error) and `CreateView` would abort the process. Unreachable from Go: `Texture.ref` is unexported and every getter derefs it. Mitigated by never acquiring from a minimised window (the trigger this project can reach); a >1s stall under extreme load stays exposed. Real fix is upstream |
+| Benchmarking the present path against production code | the readback benchmark first copied `window.RunGPU`'s `Sync`-then-`ReadRGBA` and so charged readback for 6a's redundant stall — a 6× overstatement. Mirroring production is not fidelity when production has a bug in it; benchmark the best version of the thing being replaced |
 | Window resize invalidates fixed-size target | `target.resize` (6a) reallocates texture/readback/dims; surface reconfigured on resize (6b) |
 | Static-scene fingerprint costs more than it saves | Phase 7c: measure hash cost vs upload+dispatch; keep only if net win |
 | Ill-conditioned ops (dodge/burn) make the differential oracle meaningless | Phase 12c: measured with both backends correct; excluded from the generator, still gated by the corpus where inputs are bit-identical — at the plain floor since Phase 13 |
@@ -472,8 +594,11 @@ dedicated parity scene. (Blend modes ✅; path clips ✅; sRGB remains, gated on
 - `backend/gpu/encode.go` — scene → GPU buffers + tile bins (Phase 7 `EncodeInto`, Phase 8 coarse lists)
 - `backend/gpu/raster.wgsl` — the fine rasterizer (Phase 8 per-tile lists, Phase 10 blend/clip)
 - `backend/gpu/renderer.go` — encode → upload → dispatch (Phase 6 `Resize`, Phase 7 buffer reuse)
-- `backend/gpu/target.go` — offscreen texture + readback (Phase 6a `resize`)
-- `backend/gpu/present.go` — glfw surface + blit present (Phase 6b, new; `gpupresent` build tag)
+- `backend/gpu/target.go` — offscreen texture + readback (Phase 6a `resize`, 6b `TextureBinding`)
+- `backend/gpu/blit.go` + `blit.wgsl` — target → surface-format blit, format/present-mode choice
+  (Phase 6b). Deliberately **untagged**: it is the pixel path, so CI tests it headlessly.
+- `backend/gpu/present.go` — glfw window + surface + present loop (Phase 6b; `gpupresent` build
+  tag). Only the parts that genuinely need a display.
 - `backend/window/window.go` — window loop; gains a GPU-backed variant (Phase 6a)
 
 ---
@@ -1338,14 +1463,20 @@ isolated buffer, then composites as a unit.
 
 ### Phase 19 — sRGB vs linear-light compositing toggle  ⏳ planned
 
-Merges Part I's deferred sRGB item (Phase 10 last bullet, gated on 6b's sRGB surface).
+Merges Part I's deferred sRGB item (Phase 10 last bullet). That item was gated on "6b's sRGB
+surface" and the gate turned out not to exist: 6b measured `bgra8unorm` on Metal and takes
+the non-sRGB format deliberately, so nothing in the present path converts today. This phase
+is therefore **not** unblocked by 6b — it stands on its own.
 
 - [ ] A `parity.ColorSpace` toggle: composite in linear-light (decode sRGB→linear before blending,
       re-encode after) vs the current sRGB-space compositing. Applied identically on both backends.
-- [ ] The 6b blit shader already must handle RGBA→BGRA/sRGB surface conversion; this phase makes the
-      **compositing space** explicit and toggleable rather than implicit, and adds the decode/encode
-      to both `raster/fill.go` and `raster.wgsl`. Verify the toggle changes output (blends visibly
-      differ) and that each mode holds CPU/GPU parity independently.
+- [ ] This phase makes the **compositing space** explicit and toggleable rather than implicit, and
+      adds the decode/encode to both `raster/fill.go` and `raster.wgsl`. Verify the toggle changes
+      output (blends visibly differ) and that each mode holds CPU/GPU parity independently.
+- [ ] `blit.wgsl`'s `fs_main_srgb` already inverts an sRGB encode and is gated at the quantization
+      floor — reuse its constants rather than writing a second transfer function, and note that the
+      blit assumes the target holds sRGB-encoded bytes. If this phase makes the target *linear*,
+      that assumption is what breaks, and `TestBlitToUnormSurfaceIsExact` is what will catch it.
 
 **Done when:** both compositing spaces pass exact parity CPU-vs-GPU, and the linear-vs-sRGB
 difference is demonstrated by a corpus entry that diverges between the two modes.
@@ -1451,9 +1582,14 @@ caller, with a test per row of the table above, and the contract is written down
 - [ ] **Benchmark harness at equal correctness.** Extend the existing `bench_test.go` so every
       benchmark is paired with the parity assertion for the same scene — a speedup is only reported
       if the output still passes its `tol`. "Faster" that isn't "still correct" is not a result.
-- [ ] **Per-stage timing.** Break the frame into encode / upload / dispatch / readback (and, post-6b,
-      blit / present) with GPU timestamp queries where available; log per-stage ms so a regression is
-      attributed to a stage, not the whole frame. Extends Part I's `logTiming`.
+- [ ] **Per-stage timing.** Break the frame into encode / upload / dispatch / readback / blit /
+      present with GPU timestamp queries where available; log per-stage ms so a regression is
+      attributed to a stage, not the whole frame. Extends Part I's `logTiming`. 6b's
+      `BenchmarkPresentVia*` pair is the crude version — whole-path wall clock, differenced against
+      dispatch-only to price readback vs blit — and it works because a benchmark can be pinned to a
+      scene and a size. Note what it cannot do, which is why this item stands: it cannot attribute
+      cost *inside* a stage, and it cannot be read off a live window at all (vsync pins the frame
+      rate to the display and macOS throttles unfocused ones — see 6b).
 - [ ] **Tile occupancy metrics.** Per-tile segment-count / node-count / clip-count histogram from the
       encoder (the data already exists in `TileSegOff`/`TileNodes`); surfaces load imbalance (the
       "one dense tile stalls the dispatch" failure mode). Fallback coverage is already counted —

@@ -66,9 +66,14 @@ If a non-Metal backend does diverge past the floor, the first suspects are named
 FMA contraction (WGSL cannot forbid it, and f32 has the headroom to show it) and the
 `routeCol` tile-backdrop summation order.
 
-**Windowed present goes through a readback bridge** (Phase 6a). Every frame does
-GPU → CPU → GPU. Native surface present (Phase 6b) is **not done** — no `present.go`
-exists. The window path is validated headlessly; the display itself is on-device only.
+**Two window paths.** `window.RunGPU` (Phase 6a) still goes through a readback bridge —
+GPU → CPU → GPU every frame — because it borrows Ebiten's loop. `gpu.RunPresent`
+(Phase 6b, `gpupresent` build tag) presents from a native wgpu surface with no readback.
+The roundtrip it drops is worth **~0.4 ms and 3.69 MB per frame** at 1280×720 — the
+allocation is the real prize; the time is modest because Apple silicon's unified memory
+means the "readback" never crosses a bus. On a discrete GPU it should matter more, and
+this project has no discrete GPU to say so on. The blit is gated headlessly at Δ=0; the
+display itself is on-device only, and only Metal has run it.
 
 **No CI.** There is no workflow in this repo, so there is no badge claiming one.
 `go test ./...` is the gate, run by hand.
@@ -286,8 +291,7 @@ Historical measurements, with the conditions they were taken under, are in
 |---|---|
 | Patterns / image sampling | Phase 17. The correctness crux is pinned filter kernels — not delegating to a driver-defined hardware sampler. |
 | Group opacity / masks | Phase 18. Needs an isolated-layer pass; `(A over B) at 0.5` ≠ `A@0.5 over B@0.5`. |
-| sRGB vs linear-light toggle | Phase 19. Interacts with 6b's surface. |
-| Native surface present | Phase 6b. Windowed output goes through a readback bridge today. |
+| sRGB vs linear-light toggle | Phase 19. It was expected to ride in on 6b's surface; 6b measured a non-sRGB surface and takes it deliberately, so this stands alone. |
 
 **Text is out of scope, by decision.** After flattening, a glyph is just filled
 paths, which the parity machine already covers — so text adds no new *rasterization*
@@ -304,6 +308,7 @@ none of which is a renderer concern. If added later, glyphs enter as ordinary fi
 | `backend/png` | `png.Encode(w, s, pxW, pxH) error` | `cpu.Render` + stdlib PNG. Zero deps. |
 | `backend/svg` | `svg.Encode(w, s, pxW, pxH) error` | Vector output. **Silently drops features — see below.** Zero deps. |
 | `backend/gpu` | `gpu.NewRenderer(w, h)` / `gpu.NewRendererOn(backend, w, h)` | WebGPU compute. Own module, cgo. |
+| `backend/gpu` (present) | `gpu.RunPresent(title, w, h, frame)` | Native wgpu surface, no readback. Needs `-tags gpupresent` (quarantines glfw). |
 | `backend/window` | `window.Run(...)` / `window.RunGPU(...)` | Ebiten loop. `RunGPU` uses the readback bridge. Own module, cgo. |
 
 **The SVG backend has five silent gaps, and three of them are wrong output rather
