@@ -37,7 +37,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
-          cache: false # the core has no deps to cache; see the zero-dep job
+          cache: false
       - run: go build ./...
       - run: go vet ./...
       # -count=1 so a cache hit can never stand in for a run on this hardware,
