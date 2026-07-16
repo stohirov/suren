@@ -78,8 +78,16 @@ func main() {
 		log.Fatal(err)
 	}
 	defer svgFile.Close()
-	if _, err := svg.Encode(svgFile, c.Scene(), w, h); err != nil {
+	rep, err := svg.Encode(svgFile, c.Scene(), w, h)
+	if err != nil {
 		log.Fatal(err)
+	}
+	// A valid SVG is written either way, so err alone cannot tell you the
+	// vectors match the pixels — ask the report. Every paint above is one SVG
+	// has a primitive for, so this stays quiet; swap one for a conic and it
+	// will name the node it dropped.
+	if rep.Lossy() {
+		log.Printf("SVG dropped: %v", rep.Dropped)
 	}
 
 	log.Println("wrote 06-gradient.png and 06-gradient.svg")

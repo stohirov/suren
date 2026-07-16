@@ -100,8 +100,15 @@ func main() {
 		log.Fatal(err)
 	}
 	defer svgFile.Close()
-	if _, err := svg.Encode(svgFile, c.Scene(), w, h); err != nil {
+	rep, err := svg.Encode(svgFile, c.Scene(), w, h)
+	if err != nil {
 		log.Fatal(err)
+	}
+	// A valid SVG is written either way, so err alone cannot tell you the
+	// vectors match the pixels — ask the report. This scene is solid paint,
+	// strokes and transforms, all of which SVG expresses, so it stays quiet.
+	if rep.Lossy() {
+		log.Printf("SVG dropped: %v", rep.Dropped)
 	}
 
 	log.Println("wrote 05-scene.png and 05-scene.svg")
