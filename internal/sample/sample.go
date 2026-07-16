@@ -135,6 +135,62 @@ func ConicScene(seam bool) *scene.Scene {
 	return c.Scene()
 }
 
+// meshGrid colours a paint.MeshGrid from a function of the normalized grid
+// position. f is sampled once per grid VERTEX, so neighbouring quads share both
+// the point and its colour and the mesh is continuous across interior edges.
+func meshGrid(r geom.Rect, cols, rows int, f func(u, v float64) paint.Color) paint.MeshGradient {
+	colors := make([]paint.Color, 0, (cols+1)*(rows+1))
+	for j := range rows + 1 {
+		for i := range cols + 1 {
+			colors = append(colors, f(float64(i)/float64(cols), float64(j)/float64(rows)))
+		}
+	}
+	return paint.MeshGrid(r, cols, rows, colors)
+}
+
+// MeshScene fills three shapes with Gouraud triangle meshes: a plain quad grid, a
+// rotated-and-sheared node (so the inverse transform is exercised rather than the
+// identity), and a stroke.
+//
+// Every mesh is built over a rect INFLATED past the shape that uses it, and that
+// is load-bearing rather than tidy. A mesh drops to transparent outside its
+// triangles, so its silhouette is a colour discontinuity — the same species as a
+// conic's seam — and a pixel centre landing within f32's reach of a boundary edge
+// could be opaque on one backend and transparent on the other. Keeping the
+// boundary outside the filled path means no boundary pixel is ever sampled, which
+// is the scene-level remedy the type documents. A mesh clipped exactly to its own
+// outline would be measuring that hazard instead of the interpolation.
+func MeshScene() *scene.Scene {
+	c := render.NewCanvas()
+	warm := func(u, v float64) paint.Color {
+		return paint.RGBA(0.15+0.8*u, 0.25+0.55*v, 0.85-0.6*u*v, 1)
+	}
+	// Alpha varies across the mesh too, so the premultiply is not a constant
+	// factor that a wrong interpolation order could hide behind.
+	cool := func(u, v float64) paint.Color {
+		return paint.RGBA(0.95-0.7*v, 0.35+0.5*u, 0.4+0.5*v, 0.35+0.6*u)
+	}
+
+	c.FillColor(path.Rect(geom.RectXYWH(0, 0, W, H)), paint.FromRGBA8(250, 249, 246, 255))
+
+	c.Fill(path.Rect(geom.RectXYWH(14, 20, 86, 86)),
+		meshGrid(geom.RectXYWH(8, 14, 98, 98), 3, 3, warm), paint.NonZero)
+
+	c.Save()
+	c.Translate(170, 62)
+	c.Rotate(math.Pi / 7)
+	c.Transform(geom.Shear(0.2, 0))
+	c.Fill(path.Circle(geom.Pt(0, 0), 40),
+		meshGrid(geom.RectXYWH(-52, -52, 104, 104), 2, 2, cool), paint.NonZero)
+	c.Restore()
+
+	c.Stroke(path.Circle(geom.Pt(88, 140), 30),
+		meshGrid(geom.RectXYWH(50, 102, 76, 76), 3, 3, warm),
+		paint.Stroke{Width: 11, Join: path.RoundJoin})
+
+	return c.Scene()
+}
+
 func ManyNodes(w, h, cols, rows int) *scene.Scene {
 	c := render.NewCanvas()
 	c.FillColor(path.Rect(geom.RectXYWH(0, 0, float64(w), float64(h))), paint.FromRGBA8(20, 22, 28, 255))

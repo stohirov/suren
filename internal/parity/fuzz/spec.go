@@ -108,8 +108,14 @@ const (
 	PaintLinear
 	PaintRadial
 	PaintConic
+	PaintMesh
 )
 
+// PaintSpec carries every paint kind's parameters in one flat record. Stops does
+// double duty for PaintMesh, holding the grid's vertex COLOURS in row-major order
+// with Offset unused — the same generalization the GPU's own Stop record makes
+// (see backend/gpu's encode.go), and it keeps solid() and size() working for
+// meshes without a special case.
 type PaintSpec struct {
 	Kind   PaintKind    `json:"kind"`
 	Color  paint.Color  `json:"color,omitzero"`
@@ -118,6 +124,9 @@ type PaintSpec struct {
 	Center geom.Point   `json:"center,omitzero"`
 	Radius float64      `json:"radius,omitempty"`
 	Angle  float64      `json:"angle,omitempty"`
+	Rect   geom.Rect    `json:"rect,omitzero"`
+	Cols   int          `json:"cols,omitempty"`
+	Rows   int          `json:"rows,omitempty"`
 	Stops  []paint.Stop `json:"stops,omitempty"`
 }
 
@@ -129,6 +138,12 @@ func (p PaintSpec) Paint() paint.Paint {
 		return paint.RadialGradient{Center: p.Center, Radius: p.Radius, Stops: p.Stops}
 	case PaintConic:
 		return paint.ConicGradient{Center: p.Center, Angle: p.Angle, Stops: p.Stops}
+	case PaintMesh:
+		colors := make([]paint.Color, len(p.Stops))
+		for i, s := range p.Stops {
+			colors[i] = s.Color
+		}
+		return paint.MeshGrid(p.Rect, p.Cols, p.Rows, colors)
 	}
 	return paint.Solid{Color: p.Color}
 }
@@ -149,6 +164,19 @@ func (p PaintSpec) validate() error {
 		}
 		if p.Kind == PaintRadial && p.Radius <= 0 {
 			return fmt.Errorf("radial gradient has radius %v", p.Radius)
+		}
+	case PaintMesh:
+		if p.Cols < 1 || p.Rows < 1 {
+			return fmt.Errorf("mesh grid is %dx%d, need at least 1x1", p.Cols, p.Rows)
+		}
+		if p.Rect.Empty() {
+			return fmt.Errorf("mesh has an empty rect %v", p.Rect)
+		}
+		// paint.MeshGrid indexes colors[j*(cols+1)+i] with no bounds story of its
+		// own, so a short slice is a panic rather than a bad render. The shrinker
+		// rewrites specs and Load accepts them from disk; both reach this.
+		if want := (p.Cols + 1) * (p.Rows + 1); len(p.Stops) != want {
+			return fmt.Errorf("mesh %dx%d has %d vertex colours, need exactly %d", p.Cols, p.Rows, len(p.Stops), want)
 		}
 	default:
 		return fmt.Errorf("unknown paint kind %d", p.Kind)

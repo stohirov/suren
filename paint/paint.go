@@ -160,6 +160,158 @@ type ConicGradient struct {
 
 func (ConicGradient) isPaint() {}
 
+// MeshVertex is a colour at a point in paint space.
+type MeshVertex struct {
+	P     geom.Point
+	Color Color
+}
+
+// MeshTriangle is a Gouraud triangle: three coloured corners, the colour of any
+// interior point being their barycentric combination.
+type MeshTriangle struct {
+	V [3]MeshVertex
+}
+
+// MeshGradient is a Gouraud triangle mesh — PDF shading types 4/5 — evaluated per
+// pixel by MeshAt. A point outside every triangle is transparent.
+//
+// # Why triangles rather than Coons patches
+//
+// The plan named "Coons-patch / Gouraud" and predicted per-patch interpolation
+// would miss the exact floor. Triangles are the half that fits this renderer's
+// shape, and the reason is the INVERSE map, not the interpolation.
+//
+// A Paint here answers "what colour is at this pixel", so shading needs device
+// space → patch parameter. For a Gouraud triangle that inverse is a closed-form
+// 2x2 solve: barycentric coordinates, one division, no iteration. For a Coons
+// patch with cubic edges it is a 2D nonlinear solve — Newton, per pixel — and to
+// keep parity BOTH backends would have to run bit-comparable iterations from the
+// same initial guess with the same fixed step count, since an early-exit whose
+// predicate is evaluated in f32 on one side and f64 on the other is a different
+// function, not a rounding difference. That is a large amount of machinery whose
+// correctness story is worse, and a caller can tessellate a Coons patch into
+// triangles anyway.
+//
+// # Where it is ill-conditioned
+//
+// The mesh's outer SILHOUETTE is not safe, for the same reason a conic's seam is
+// not: colour drops to transparent across it, so the paint is discontinuous and a
+// pixel centre within f32's reach of a boundary edge can be opaque on one backend
+// and transparent on the other. Unlike the conic there is no closed-loop trick —
+// a mesh has to end somewhere. The remedy is scene-level and is what MeshScene
+// does: extend the mesh past the filled path so no boundary pixel is ever
+// sampled. See internal/sample.
+//
+// Interior edges are safe only because MeshEps makes them so. See MeshEps: the
+// first draft asserted they were safe by construction and was wrong, in a way
+// that drew a visible crack.
+type MeshGradient struct {
+	Triangles []MeshTriangle
+}
+
+func (MeshGradient) isPaint() {}
+
+// MeshGrid tessellates r into a cols x rows quad grid, splitting each quad into
+// two Gouraud triangles along its top-left/bottom-right diagonal. colors are the
+// (rows+1)*(cols+1) grid-vertex colours in row-major order.
+//
+// It exists so the triangulation ORDER is stated once. MeshAt resolves overlap by
+// first match, so the order in which quads and their two halves are emitted is
+// part of the mesh's meaning, not an implementation detail — two callers building
+// "the same" grid differently would disagree along every shared diagonal. Sharing
+// vertices between neighbouring quads is the other half: a vertex colour is read
+// from one place, so adjacent triangles agree along their shared edge by
+// construction and the mesh is continuous.
+func MeshGrid(r geom.Rect, cols, rows int, colors []Color) MeshGradient {
+	at := func(i, j int) MeshVertex {
+		u, v := float64(i)/float64(cols), float64(j)/float64(rows)
+		return MeshVertex{
+			P:     geom.Pt(r.Min.X+u*r.Width(), r.Min.Y+v*r.Height()),
+			Color: colors[j*(cols+1)+i],
+		}
+	}
+	m := MeshGradient{Triangles: make([]MeshTriangle, 0, 2*cols*rows)}
+	for j := range rows {
+		for i := range cols {
+			a, b, c, d := at(i, j), at(i+1, j), at(i+1, j+1), at(i, j+1)
+			m.Triangles = append(m.Triangles,
+				MeshTriangle{V: [3]MeshVertex{a, b, c}},
+				MeshTriangle{V: [3]MeshVertex{a, c, d}})
+		}
+	}
+	return m
+}
+
+// MeshEps is the slack in the barycentric inside test, in NORMALIZED barycentric
+// units — the weights sum to 1, so it is a fraction of a triangle rather than a
+// distance, and it means the same thing for a 3px triangle and a 300px one.
+//
+// It is not a fudge factor. Without it, two triangles sharing an edge each reject
+// a point ON that edge and the mesh draws a HAIRLINE CRACK along every interior
+// diagonal, because the shared edge's weight is computed by two DIFFERENT
+// expressions: it is an edge function over the denominator in one triangle and
+// `1 - l0 - l1` in the other. In exact arithmetic those are complementary — one
+// is zero exactly when the other is, and the two sign tests partition the edge.
+// In floating point they are independent roundings of the same real zero, so both
+// can land a hair negative and both `l >= 0` tests fail.
+//
+// Measured, and the polarity is the lesson: on a 3x3 quad grid a pixel centre
+// landing exactly on a shared diagonal came out l=-3.5e-17 in one triangle and
+// l=-8.3e-17 in the other — so the f64 CPU reference rejected BOTH and painted
+// the background through the mesh, 41 pixels of visible crack, while the f32 GPU
+// rounded the same real zero to +0.0, accepted, and drew correctly (Δ=198). MORE
+// precision made it worse: exact zero is the only value both triangles accept, and
+// f64 is better at not landing on it.
+//
+// This was a bug in BOTH renderers that only the DIFFERENTIAL could see. A CPU
+// golden would have recorded the crack as the expected output and gated it there
+// forever; the GPU had no bug to find. It is the clearest case in this tree for
+// why the reference is not the oracle — see internal/parity.
+//
+// 1e-5 is ~300x the f32 noise measured at that pixel (3e-8) and still far below
+// any visible effect: it widens each triangle by a hundred-thousandth of itself,
+// so the silhouette moves by a small fraction of a pixel and a point near an
+// interior edge is accepted by the FIRST of the two triangles on both backends —
+// which is the point. The slack does not need to pick the right triangle, only
+// the SAME one, and Gouraud continuity makes the two agree along the edge anyway.
+const MeshEps = 1e-5
+
+// MeshAt is the canonical mesh evaluator: raster.wgsl's meshColor is a verbatim
+// port, term for term and in the same order, and the two must not drift. It is
+// stated once here for the same reason raster.Coefficients states the Porter-Duff
+// table once.
+//
+// First match wins, in triangle order. Overlapping triangles are therefore
+// resolved by the scene's own ordering rather than by depth, and — see the type's
+// comment — a shared interior edge makes the choice immaterial to the colour.
+//
+// A degenerate triangle (zero area, so the barycentric denominator vanishes) is
+// SKIPPED rather than divided by. That case is reachable from any caller and the
+// division would otherwise produce infinities that the inside test would then
+// compare, which is undefined behaviour dressed up as a colour.
+func MeshAt(tris []MeshTriangle, q geom.Point) (Color, bool) {
+	for _, t := range tris {
+		a, b, c := t.V[0], t.V[1], t.V[2]
+		d := (b.P.Y-c.P.Y)*(a.P.X-c.P.X) + (c.P.X-b.P.X)*(a.P.Y-c.P.Y)
+		if d == 0 {
+			continue
+		}
+		l0 := ((b.P.Y-c.P.Y)*(q.X-c.P.X) + (c.P.X-b.P.X)*(q.Y-c.P.Y)) / d
+		l1 := ((c.P.Y-a.P.Y)*(q.X-c.P.X) + (a.P.X-c.P.X)*(q.Y-c.P.Y)) / d
+		l2 := 1 - l0 - l1
+		if l0 < -MeshEps || l1 < -MeshEps || l2 < -MeshEps {
+			continue
+		}
+		return Color{
+			R: l0*a.Color.R + l1*b.Color.R + l2*c.Color.R,
+			G: l0*a.Color.G + l1*b.Color.G + l2*c.Color.G,
+			B: l0*a.Color.B + l1*b.Color.B + l2*c.Color.B,
+			A: l0*a.Color.A + l1*b.Color.A + l2*c.Color.A,
+		}, true
+	}
+	return Color{}, false
+}
+
 func Interp(stops []Stop, t float64) Color {
 	if len(stops) == 0 {
 		return Color{}

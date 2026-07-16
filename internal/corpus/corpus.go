@@ -86,6 +86,19 @@ func All() []Entry {
 		// to gate where the seam falls, not to suggest a seam is safe.
 		{"gradient-conic", sample.W, sample.H, func() *scene.Scene { return sample.ConicScene(false) }, parity.Quantized()},
 		{"gradient-conic-seam", sample.W, sample.H, func() *scene.Scene { return sample.ConicScene(true) }, parity.Quantized()},
+		// Quantized, and the plan expected otherwise: Phase 16 predicted mesh
+		// interpolation would miss the exact floor and need perceptual mode. That
+		// prediction was about COONS patches, whose device→parameter inverse is a
+		// per-pixel Newton solve; a Gouraud triangle's inverse is a closed-form
+		// linear solve, so it sits at the floor like every other paint and needs
+		// neither perceptual mode nor Phase 14's fallback. Measured Δ=1.
+		//
+		// This entry also gates paint.MeshEps: its geometry puts pixel centres
+		// exactly on shared diagonals, which is how the hairline crack was found
+		// (Δ=198). Note what a golden alone would have done here — recorded the
+		// crack as expected output and gated it forever. Only the differential saw
+		// it, because the bug was in the REFERENCE.
+		{"mesh", sample.W, sample.H, sample.MeshScene, parity.Quantized()},
 		{"many-nodes", 640, 360, func() *scene.Scene { return sample.ManyNodes(640, 360, 40, 24) }, parity.Identical()},
 		{"many-segments", 400, 300, func() *scene.Scene { return sample.ManySegments(400, 300, 300) }, parity.Quantized()},
 		{"clip-rect", 96, 96, sample.ClipRectScene, parity.Identical()},

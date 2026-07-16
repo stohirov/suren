@@ -198,7 +198,7 @@ func randTransform(rng *rand.Rand) geom.Matrix {
 }
 
 func randPaint(rng *rand.Rand) PaintSpec {
-	switch rng.IntN(5) {
+	switch rng.IntN(6) {
 	case 0:
 		return PaintSpec{
 			Kind:  PaintLinear,
@@ -215,8 +215,41 @@ func randPaint(rng *rand.Rand) PaintSpec {
 		}
 	case 2:
 		return randConic(rng)
+	case 3:
+		return randMesh(rng)
 	default:
 		return PaintSpec{Kind: PaintSolid, Color: randColor(rng)}
+	}
+}
+
+// randMesh emits a Gouraud grid that OVERHANGS the canvas by a wide margin, and
+// the overhang is a correctness requirement rather than padding.
+//
+// A mesh is transparent outside its triangles, so its silhouette is a colour
+// discontinuity — the same unbounded amplifier as an open conic's seam, and the
+// same reason the oracle would not apply. A pixel centre landing within f32's
+// reach of a boundary edge could be opaque on one backend and transparent on the
+// other, by no fault of either. Unlike the conic there is no way to close the
+// loop, so the generator keeps the boundary out of reach instead.
+//
+// The margin is measured against what a node can actually sample: paint space is
+// the pre-transform space, generated geometry stays within ~[0,96] there (see
+// randShape, which centres shapes and bounds their size), and a stroke widens
+// that by at most a few pixels. A mesh spanning [-64,160] therefore leaves ~64px
+// of slack on every side, and the silhouette is never sampled.
+func randMesh(rng *rand.Rand) PaintSpec {
+	cols, rows := 1+rng.IntN(3), 1+rng.IntN(3)
+	stops := make([]paint.Stop, (cols+1)*(rows+1))
+	for i := range stops {
+		stops[i] = paint.Stop{Color: randColor(rng)}
+	}
+	return PaintSpec{
+		Kind: PaintMesh,
+		Rect: geom.RectXYWH(-64, -64, 224, 224),
+		Cols: cols,
+		Rows: rows,
+		// Vertex colours, not stops — see PaintSpec. Offset is unused.
+		Stops: stops,
 	}
 }
 

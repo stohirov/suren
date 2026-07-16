@@ -17,15 +17,32 @@ const (
 	PaintLinear
 	PaintRadial
 	PaintConic
+	PaintMesh
 )
 
 type Segment struct {
 	X0, Y0, X1, Y1 float32
 }
 
+// Stop is a colour at a sample, which is the generalization that let the mesh
+// land without a tenth binding.
+//
+// For a gradient the sample is a parameter (Offset) and X/Y are unused; for a
+// mesh it is a point (X, Y) and Offset is unused, with three consecutive records
+// forming one Gouraud triangle. The shader keys on Node.Kind, so one table serves
+// both and StopStart/StopCount address it either way.
+//
+// The alternative was a tenth binding for a triangle buffer, and it was not
+// available: raster.wgsl already holds EIGHT storage buffers, which is exactly
+// WebGPU's default maxStorageBuffersPerShaderStage. A ninth would mean requesting
+// a raised limit at device creation — the first time this renderer demanded more
+// than the portable default, and a new way for a backend 12d has never run on to
+// fail. Two f32 per stop is the cheaper price by far: gradients carry a handful
+// of stops per node, so the waste is bytes, not frames.
 type Stop struct {
 	Offset     float32
 	R, G, B, A float32
+	X, Y       float32
 }
 
 type Node struct {
@@ -365,6 +382,11 @@ func (e *Encoded) fillPaint(nd *Node, kind PaintKind, n scene.Node) {
 		e.Stops = appendStops(e.Stops, g.Stops)
 		nd.StopCount = uint32(len(e.Stops)) - nd.StopStart
 		nd.Minv = invMatrix(n.Transform)
+	case paint.MeshGradient:
+		nd.StopStart = uint32(len(e.Stops))
+		e.Stops = appendMeshVertices(e.Stops, g.Triangles)
+		nd.StopCount = uint32(len(e.Stops)) - nd.StopStart
+		nd.Minv = invMatrix(n.Transform)
 	}
 }
 
@@ -395,6 +417,8 @@ func paintKind(p paint.Paint) (PaintKind, bool) {
 		return PaintRadial, true
 	case paint.ConicGradient:
 		return PaintConic, true
+	case paint.MeshGradient:
+		return PaintMesh, true
 	default:
 		return 0, false
 	}
@@ -433,6 +457,26 @@ func appendStops(dst []Stop, stops []paint.Stop) []Stop {
 			B:      float32(s.Color.B),
 			A:      float32(s.Color.A),
 		})
+	}
+	return dst
+}
+
+// appendMeshVertices flattens each triangle to three consecutive Stop records.
+// raster.wgsl's meshColor reads them back in threes, so the grouping is the
+// contract: a partial trailing triple would be read as a triangle with garbage
+// corners, which is why StopCount is always a multiple of three here.
+func appendMeshVertices(dst []Stop, tris []paint.MeshTriangle) []Stop {
+	for _, t := range tris {
+		for _, v := range t.V {
+			dst = append(dst, Stop{
+				R: float32(v.Color.R),
+				G: float32(v.Color.G),
+				B: float32(v.Color.B),
+				A: float32(v.Color.A),
+				X: float32(v.P.X),
+				Y: float32(v.P.Y),
+			})
+		}
 	}
 	return dst
 }

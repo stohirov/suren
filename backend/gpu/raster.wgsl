@@ -15,9 +15,16 @@ struct ClipRec { segStart: u32, segCount: u32, rule: u32, pad: u32 };
 
 struct Dims { w: u32, h: u32, nx: u32, ny: u32 };
 
-struct Stop { off: f32, r: f32, g: f32, b: f32, a: f32 };
+// Mirrors encode.go's Stop: a colour at a sample. off is the parameter for a
+// gradient (x/y unused); x/y are the point for a mesh vertex (off unused), three
+// consecutive records to a triangle. All-scalar, matching the Go struct's tight
+// 4-byte packing, so the upload maps straight on.
+struct Stop { off: f32, r: f32, g: f32, b: f32, a: f32, x: f32, y: f32 };
 
 const TILE: i32 = 16;
+
+// Mirrors paint.MeshEps.
+const MESH_EPS: f32 = 1e-5;
 
 @group(0) @binding(0) var out_tex: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(1) var<storage, read> segs: array<Seg>;
@@ -100,6 +107,48 @@ fn gradColor(nd: Node, px: f32, py: f32) -> vec4<f32> {
   // matching an artifact costs per-pixel work to enshrine an accident. Recorded
   // as a known semantic difference that lives below the floor.
   return vec4<f32>(clamp(c.x, 0.0, 1.0) * ca, clamp(c.y, 0.0, 1.0) * ca, clamp(c.z, 0.0, 1.0) * ca, ca);
+}
+
+// meshColor is a verbatim port of paint.MeshAt — same term order, same
+// first-match rule, same skip of a degenerate triangle rather than a division by
+// its vanishing area. The two state one function and must not drift; a mismatch
+// here is not a rounding artifact but the backends shading different colours.
+//
+// Premultiplication matches gradColor's: the vertex colours are STRAIGHT, so the
+// barycentric combination is taken on straight channels and the result is
+// premultiplied once at the end, which is what the reference's Color.RGBA() does.
+fn meshColor(nd: Node, px: f32, py: f32) -> vec4<f32> {
+  let qx = nd.m0 * px + nd.m2 * py + nd.m4;
+  let qy = nd.m1 * px + nd.m3 * py + nd.m5;
+  let end = nd.stopStart + nd.stopCount;
+  var i = nd.stopStart;
+  loop {
+    if (i + 3u > end) { break; }
+    let a = stops[i];
+    let b = stops[i + 1u];
+    let c = stops[i + 2u];
+    let d = (b.y - c.y) * (a.x - c.x) + (c.x - b.x) * (a.y - c.y);
+    if (d != 0.0) {
+      let l0 = ((b.y - c.y) * (qx - c.x) + (c.x - b.x) * (qy - c.y)) / d;
+      let l1 = ((c.y - a.y) * (qx - c.x) + (a.x - c.x) * (qy - c.y)) / d;
+      let l2 = 1.0 - l0 - l1;
+      // MESH_EPS mirrors paint.MeshEps. Without it two triangles sharing an edge
+      // both reject a point on it and the mesh cracks along every interior
+      // diagonal; see that constant for the measurement.
+      if (l0 >= -MESH_EPS && l1 >= -MESH_EPS && l2 >= -MESH_EPS) {
+        let cr = l0 * a.r + l1 * b.r + l2 * c.r;
+        let cg = l0 * a.g + l1 * b.g + l2 * c.g;
+        let cb = l0 * a.b + l1 * b.b + l2 * c.b;
+        let ca = clamp(l0 * a.a + l1 * b.a + l2 * c.a, 0.0, 1.0);
+        return vec4<f32>(clamp(cr, 0.0, 1.0) * ca, clamp(cg, 0.0, 1.0) * ca, clamp(cb, 0.0, 1.0) * ca, ca);
+      }
+    }
+    i = i + 3u;
+  }
+  // Outside every triangle. The drop to transparent is a DISCONTINUITY at the
+  // mesh's silhouette, and it is why a scene must extend its mesh past the path
+  // it fills — see paint.MeshGradient.
+  return vec4<f32>(0.0);
 }
 
 fn coverage(wv: f32, rule: u32) -> f32 {
@@ -389,7 +438,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       let alpha = coverage(acc - ar[lx] * 0.5, nd.rule) * clipf[lx];
       if (alpha > 0.0) {
         var src = vec4<f32>(nd.cr, nd.cg, nd.cb, nd.ca);
-        if (nd.kind != 0u) {
+        if (nd.kind == 4u) {
+          src = meshColor(nd, f32(gx) + 0.5, f32(y) + 0.5);
+        } else if (nd.kind != 0u) {
           src = gradColor(nd, f32(gx) + 0.5, f32(y) + 0.5);
         }
         // Quantize per node, not once at the end. The CPU reference composites

@@ -217,6 +217,45 @@ func TestGeneratorOmitsIllConditionedModes(t *testing.T) {
 	}
 }
 
+// Every paint kind must be REACHABLE, for the reason TestGeneratorEmitsEveryCompositeOp
+// spells out: a kind that quietly stops being generated takes its whole code path
+// out of the differential while the fuzzer keeps reporting clean executions over
+// scenes that are still perfectly valid. Nothing else notices — a scene made only
+// of solids is a scene.
+//
+// Mesh matters most here. It is the only paint whose vertex data shares the stops
+// buffer with the gradients (encode.go's Stop record), so a scene mixing the two
+// is the only thing that would catch StopStart/StopCount being mis-indexed
+// between kinds — and no hand-written corpus scene mixes them. That coverage
+// exists only as long as the generator emits both.
+func TestGeneratorEmitsEveryPaintKind(t *testing.T) {
+	const seeds = 2000
+	seen := map[PaintKind]int{}
+	mixed := 0
+	for i := range seeds {
+		kinds := map[PaintKind]bool{}
+		for _, n := range Generate(uint64(i) + 1).Nodes {
+			seen[n.Paint.Kind]++
+			kinds[n.Paint.Kind] = true
+		}
+		if kinds[PaintMesh] && (kinds[PaintLinear] || kinds[PaintRadial] || kinds[PaintConic]) {
+			mixed++
+		}
+	}
+	for kind, name := range map[PaintKind]string{
+		PaintSolid: "solid", PaintLinear: "linear", PaintRadial: "radial",
+		PaintConic: "conic", PaintMesh: "mesh",
+	} {
+		if seen[kind] == 0 {
+			t.Errorf("paint kind %s never generated over %d seeds; its path is outside the differential", name, seeds)
+		}
+	}
+	if mixed == 0 {
+		t.Errorf("no seed mixes a mesh with a gradient over %d seeds; nothing exercises two kinds sharing the stops buffer", seeds)
+	}
+	t.Logf("paint kinds over %d seeds: %v; mesh+gradient scenes: %d", seeds, seen, mixed)
+}
+
 // The paint axis's counterpart to the ill-conditioned check above, and it fails
 // in the same silent way if left out.
 //
