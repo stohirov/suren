@@ -1,6 +1,8 @@
 package cpu
 
 import (
+	"math"
+
 	"github.com/stohirov/sukho/geom"
 	"github.com/stohirov/sukho/paint"
 	"github.com/stohirov/sukho/raster"
@@ -43,6 +45,22 @@ func shader(p paint.Paint, m geom.Matrix) (raster.Shader, bool) {
 				return 0
 			}
 			return q.Sub(center).Len() / radius
+		}}, true
+	case paint.ConicGradient:
+		center, angle := g.Center, g.Angle
+		return gradShader{minv, ok, g.Stops, func(q geom.Point) float64 {
+			d := q.Sub(center)
+			// atan2(0,0) is 0 in Go and UNDEFINED in WGSL, so the exact centre
+			// pixel is pinned to t=0 on both sides rather than left to two
+			// languages' corner cases. It is reachable: a Center on a pixel
+			// centre is an ordinary thing to write. Every term below is mirrored
+			// in raster.wgsl's gradColor, division included — f32 multiply by a
+			// reciprocal is not f32 division.
+			if d.X == 0 && d.Y == 0 {
+				return 0
+			}
+			t := (math.Atan2(d.Y, d.X) - angle) / (2 * math.Pi)
+			return t - math.Floor(t)
 		}}, true
 	default:
 		return nil, false

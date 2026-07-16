@@ -65,12 +65,26 @@ fn gradColor(nd: Node, px: f32, py: f32) -> vec4<f32> {
     if (len2 > 0.0) {
       t = ((qx - nd.g0x) * dx + (qy - nd.g0y) * dy) / len2;
     }
-  } else {
+  } else if (nd.kind == 2u) {
     let radius = nd.g1x;
     if (radius > 0.0) {
       let dx = qx - nd.g0x;
       let dy = qy - nd.g0y;
       t = sqrt(dx * dx + dy * dy) / radius;
+    }
+  } else {
+    // Conic. Mirrors backend/cpu's shader.go term for term: the same subtraction
+    // order, and a DIVISION by 2π rather than a multiply by its reciprocal, which
+    // is a different f32 number.
+    //
+    // The dx==0 && dy==0 guard is not defensive, it is the contract: atan2(0,0)
+    // is 0 in Go and undefined in WGSL, so the centre pixel is pinned to t=0 on
+    // both sides instead of resting on a driver's corner case.
+    let dx = qx - nd.g0x;
+    let dy = qy - nd.g0y;
+    if (dx != 0.0 || dy != 0.0) {
+      let a = (atan2(dy, dx) - nd.g1x) / (2.0 * 3.141592653589793);
+      t = a - floor(a);
     }
   }
   let c = interpStops(nd.stopStart, nd.stopCount, t);

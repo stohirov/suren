@@ -403,6 +403,8 @@ dedicated parity scene. (Blend modes ✅; path clips ✅; sRGB remains, gated on
 | A generated scene renders nothing and passes every gate vacuously | Phase 12c: opaque background by construction; `parity.NonTrivial` skips the residue; the skip rate itself is gated at 3% |
 | A fuzz find stops reproducing when the generator changes | Phase 12c: finds are stored as explicit `Spec` JSON, not seeds — a seed's scene shifted the moment two blend modes were excluded |
 | A feature that cannot be made exact forces a tolerance widening on every scene containing it | Phase 14: per-tile CPU fallback confines the remedy to the node's own tiles; corpus keeps the full-frame gate at `Identical()` |
+| A paint whose colour is DISCONTINUOUS in the pixel position amplifies the f32-vs-f64 floor to the full distance between two stops, with both backends correct | Phase 16: conic's seam. Unlike dodge/burn there is no derivative to bound — the magnitude is the stop colours' — so no budget can be fitted. The generator emits closed loops only (`randConic`), and the hazard is measured rather than asserted (`TestConicSeamDivergesWithoutBound`: Δ=255) so the restriction has evidence behind it |
+| An adversarial probe of a float hazard aims at the right pixel and measures nothing | Phase 16: the first seam probe was Δ=0 — putting the seam *on* a pixel centre is not enough, since both precisions round the same true angle to the same f32. The hazard needs the true value inside f32's blind spot; the nudge=0 control is kept so the probe cannot silently stop probing |
 | A bbox estimate that was merely advisory becomes load-bearing when a new caller uses it to DROP work | Found in review after Phase 15: `cpu.nodeBounds` padded a stroke by `w/2`, but a miter reaches `miterLimit*w/2` (4x by default) — measured 8.9px short. Harmless while `culled()` only dropped fully off-canvas nodes; Phase 14's `tileCulled` drops against a few flagged tiles, so a miter spike escaping into one made the CPU patch overwrite correct GPU pixels (Δ=220, visible corruption). Bound now comes from `path.Stroker.MaxExtent`; `fallback-stroke_test` pins it |
 | A scene built to prove the fallback works is exact on GPU anyway, so the gate measures nothing | Phase 14: nearly shipped exactly this — the first probe was Δ=0 with the fallback off. Fixed by a node that diverges by measurement, and `TestFallbackBuysExactness` now asserts the off/on difference rather than the on result |
 | The fallback becomes the cheap general answer to "it's not exact" | Phase 14: priced at ~6µs/tile and recorded — full-frame fallback is ~14× a GPU frame and worse than the CPU backend. The benchmark reports `%frame` so a feature cannot quietly fall back on everything |
@@ -1097,21 +1099,85 @@ coverage in f32 against the reference's f64. Gating on it would read luck as a g
 **Done when:** all 12 operators pass exact parity (Δ≤1) per corpus entry; associativity invariant
 green for the qualifying subset. ✅
 
-### Phase 16 — conic + mesh gradients  ⏳ planned
+### Phase 16 — conic + mesh gradients  ⏳ conic ✅; mesh planned
 
 Linear/radial are done. Two more paint kinds:
 
-- [ ] **Conic (angular):** `paint.ConicGradient{Center, Angle, Stops}`; parameter is `atan2` of the
+- [x] **Conic (angular):** `paint.ConicGradient{Center, Angle, Stops}`; parameter is `atan2` of the
       inverse-transformed pixel. Same stop-table machinery as linear/radial in both `backend/cpu`
-      `shader.go` and `raster.wgsl`; add the kind to the encoder's gradient geometry. Exact-mode
-      gate (Δ≤1) — it's the same interpolation, only the parameter differs.
+      `shader.go` and `raster.wgsl`; added `PaintConic` to the encoder's gradient geometry (the
+      `G0`/`G1` slots already carry per-kind geometry — endpoints for linear, centre+radius for
+      radial, centre+angle here — so no struct grew). Exact-mode gate (Δ≤1), earned: corpus
+      `gradient-conic` and `gradient-conic-seam` both measure **Δ=1**, the same floor linear and
+      radial sit at. 2.3M differential executions over the widened space, no failures.
+
+**The plan's one-line prediction — "it's the same interpolation, only the parameter differs" — is
+true of the arithmetic and false of the correctness story. The parameter WRAPS, and that makes conic
+the first paint that is ill-conditioned by construction rather than by arithmetic.**
+
+- [x] **FINDING — an open seam is a discontinuity, and no tolerance can own it.** Where the first and
+      last stops differ, crossing the ray at `Angle` takes `t` from just under 1 to just over 0 and
+      the colour jumps between them. Linear and radial are continuous in the pixel position, so their
+      f32-vs-f64 parameter difference stays sub-LSB and the floor absorbs it; a discontinuity
+      *amplifies without bound*, and unlike ColorDodge the magnitude is set by the **stop colours**
+      rather than by the arithmetic — so there is no derivative to bound and no budget to fit.
+      Measured, not argued: `TestConicSeamDivergesWithoutBound` aims a seam through a pixel centre and
+      gets **Δ=255 on 1 pixel of 8192**, with *both backends individually correct* — the true
+      parameter there sits 1e-9 from the wrap and f32 cannot resolve which side it falls on. It is
+      bounded in **extent, not magnitude**: rare rather than mild.
+- [x] **The first probe measured Δ=0, and the reason is the useful part.** Aiming the seam exactly
+      through a pixel centre is *not* enough: f32 `atan2(11,37)` rounds to the same f32 as
+      `float32(f64 atan2(11,37))`, so both backends compute `t=0` on the nose and agree exactly. The
+      hazard needs the true value inside f32's **blind spot**, not merely on the ray — hence a 1e-9
+      nudge to `Angle`, below f32's ~3e-8 resolution there and far above f64's. Both cases are in the
+      tree: the probe asserts Δ≥128 *at the aimed pixel*, and `TestConicSeamIsExactWhenF32CanResolveIt`
+      is the control at nudge=0, without which Δ=255 could equally mean the implementation is simply
+      broken.
+- [x] **The generator emits CLOSED conics only** (last stop colour = first), which is the same measured
+      scope decision as excluding ColorDodge/ColorBurn, for the same reason: a differential oracle
+      needs a well-conditioned function. Closing the loop makes the paint continuous, which puts conic
+      back where linear and radial are while still generating the whole atan2 path, the wrap, and the
+      inverse transform. `TestGeneratorEmitsOnlyClosedConicGradients` pins it **in both directions** —
+      an exclusion satisfied by never generating a conic at all would be vacuous (1047 conics over
+      2000 seeds). Seams stay covered where the oracle *does* apply: `gradient-conic-seam` pins one
+      over fixed geometry, where the ray's position is a property of the scene and not of a seed. That
+      entry's Δ=1 is a fact about these centres on this driver, **not** evidence a seam is safe.
+- [x] **A vacuity bug in the new generator, caught by measuring rather than by review.** `randStops`
+      draws 2–4 stops; closing the loop overwrites the last colour with the first, so a **two-stop
+      conic comes out a constant colour** — a solid paint wearing a gradient's name. A third of every
+      conic generated would have exercised no atan2 at all while passing everything. Conic now draws
+      3–4 stops via `randStopsN`.
+- [x] **Semantics need an oracle the parity machine cannot supply.** Every other gate compares the two
+      backends, or compares the CPU against a golden the CPU generated — all blind to a semantic error
+      the two renderers *share*. A conic sweeping the wrong way or starting a quarter-turn off would
+      render identically on both, match its golden byte-for-byte, and pass every corpus entry.
+      `TestConicParameterMapping` asserts the mapping against hand-computed angles instead (right=0,
+      down=0.25 — device y grows downward, so increasing atan2 sweeps clockwise on screen — left=0.5,
+      up=0.75, plus `Angle` rotating the start), which is Phase 15's `alphaOracle` discipline applied
+      to a paint.
+- [x] **`atan2(0,0)` is 0 in Go and UNDEFINED in WGSL**, so the exact centre pixel is pinned to `t=0`
+      on both sides rather than resting on a driver's corner case. Reachable, not theoretical — a
+      `Center` on a pixel centre is an ordinary thing to write. Injection-verified: removing the guard
+      turns the centre pixel from `{255,0,0}` into `{41,0,214}`.
+- [x] **Trivial-scene rate 1.8% → 2.4%** against 12c's 3% gate, and conic is **not** the cause. A
+      controlled A/B (identical RNG stream and scenes, conic collapsed to a solid of its first stop)
+      shows conic *reduces* triviality: **1.12% vs 1.52%** on the same 1252 scenes. The rise is the
+      re-roll — adding a draw to `randPaint` reshuffles every seed's scene, exactly the Phase 15
+      lesson — and at n=3000 the 1.80%→2.37% difference is ~1.5σ, i.e. sampling noise. The first split
+      that *looked* like evidence (scenes "without conic" at 3.26%) was confounded: conditioning on
+      no-conic biases toward scenes with fewer nodes, which are likelier to be trivial. Headroom is
+      now 21% of the gate rather than 40%; recorded so the next generator change starts from the real
+      number.
+- [ ] *Deferred:* the SVG backend drops conic nodes silently, as it already does for any paint it
+      cannot express — SVG has no conic-gradient element (CSS does; SVG 1.1/2 do not). Same standing
+      caveat as its ignoring path clips.
 - [ ] **Mesh (Coons-patch / Gouraud):** the hard one. Per-patch bilinear/bicubic color
       interpolation over a grid of control points. Likely **perceptual-mode** (12a) because f32-vs-f64
       patch interpolation won't hit Δ≤1, and a candidate for Phase 14 CPU fallback if GPU divergence
       is large. Decide exact-vs-perceptual by measurement, then record the forcing operation per
       Phase 11.
 
-**Done when:** conic passes exact parity; mesh passes at its measured-and-documented tolerance,
+**Done when:** conic passes exact parity ✅; mesh passes at its measured-and-documented tolerance,
 with the fallback decision recorded.
 
 ### Phase 17 — pattern fills + image sampling  ⏳ planned

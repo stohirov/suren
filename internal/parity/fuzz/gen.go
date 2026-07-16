@@ -198,7 +198,7 @@ func randTransform(rng *rand.Rand) geom.Matrix {
 }
 
 func randPaint(rng *rand.Rand) PaintSpec {
-	switch rng.IntN(4) {
+	switch rng.IntN(5) {
 	case 0:
 		return PaintSpec{
 			Kind:  PaintLinear,
@@ -213,13 +213,57 @@ func randPaint(rng *rand.Rand) PaintSpec {
 			Radius: 12 + rng.Float64()*36,
 			Stops:  randStops(rng),
 		}
+	case 2:
+		return randConic(rng)
 	default:
 		return PaintSpec{Kind: PaintSolid, Color: randColor(rng)}
 	}
 }
 
+// randConic emits CLOSED conic gradients only — first stop colour equal to last —
+// and the restriction is the same measured scope decision as blendModes'
+// exclusion of ColorDodge and ColorBurn, arrived at for the same reason.
+//
+// An open conic jumps from its last stop to its first across the ray at Angle, so
+// the paint is DISCONTINUOUS there. A discontinuity amplifies the sub-LSB
+// difference between the CPU's f64 atan2 and the GPU's f32 one without bound: a
+// pixel centre landing within f32's reach of the ray takes opposite branches and
+// the two backends differ by the full distance between those two stops, with both
+// individually correct. Measured, not argued — backend/gpu's
+// TestConicSeamDivergesWithoutBound puts a seam through a pixel centre and gets
+// Δ=255 on one pixel of 8192.
+//
+// A budget cannot be fitted to that, because the magnitude is set by the stop
+// colours rather than by the arithmetic; it is rare, not mild. Closing the loop
+// makes the paint continuous, which puts conic back where linear and radial
+// already are — the f32-vs-f64 parameter difference stays sub-LSB and the
+// ordinary floor holds — while still generating the whole atan2 path, the wrap,
+// and the inverse transform.
+//
+// Seams stay covered where the oracle DOES apply: the gradient-conic-seam corpus
+// entry pins one over fixed geometry, where the ray's position is a property of
+// the scene rather than of a seed.
+func randConic(rng *rand.Rand) PaintSpec {
+	// Three stops minimum, where the other gradients take two. Closing the loop
+	// overwrites the last colour with the first, so a two-stop conic would come
+	// out a CONSTANT colour — a solid paint wearing a gradient's name, exercising
+	// none of the atan2 path it is here for. randStops draws 2..4, which would
+	// have made a third of every conic generated vacuous.
+	stops := randStopsN(rng, 3+rng.IntN(2))
+	stops[len(stops)-1].Color = stops[0].Color
+	return PaintSpec{
+		Kind:   PaintConic,
+		Center: geom.Pt(W/2+(rng.Float64()*2-1)*16, H/2+(rng.Float64()*2-1)*16),
+		Angle:  (rng.Float64()*2 - 1) * math.Pi,
+		Stops:  stops,
+	}
+}
+
 func randStops(rng *rand.Rand) []paint.Stop {
-	n := 2 + rng.IntN(3)
+	return randStopsN(rng, 2+rng.IntN(3))
+}
+
+func randStopsN(rng *rand.Rand, n int) []paint.Stop {
 	stops := make([]paint.Stop, n)
 	for i := range stops {
 		stops[i] = paint.Stop{Offset: float64(i) / float64(n-1), Color: randColor(rng)}

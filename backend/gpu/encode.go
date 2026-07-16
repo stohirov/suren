@@ -16,6 +16,7 @@ const (
 	PaintSolid PaintKind = iota
 	PaintLinear
 	PaintRadial
+	PaintConic
 )
 
 type Segment struct {
@@ -353,6 +354,17 @@ func (e *Encoded) fillPaint(nd *Node, kind PaintKind, n scene.Node) {
 		e.Stops = appendStops(e.Stops, g.Stops)
 		nd.StopCount = uint32(len(e.Stops)) - nd.StopStart
 		nd.Minv = invMatrix(n.Transform)
+	// G0/G1 are the gradient's geometry slots, read per kind: the two endpoints
+	// for linear, centre and radius for radial, centre and start angle here. The
+	// shader keys on Kind, so the slots carry whatever that kind needs rather than
+	// growing a field per gradient type.
+	case paint.ConicGradient:
+		nd.G0 = pt(g.Center)
+		nd.G1 = [2]float32{float32(g.Angle), 0}
+		nd.StopStart = uint32(len(e.Stops))
+		e.Stops = appendStops(e.Stops, g.Stops)
+		nd.StopCount = uint32(len(e.Stops)) - nd.StopStart
+		nd.Minv = invMatrix(n.Transform)
 	}
 }
 
@@ -381,6 +393,8 @@ func paintKind(p paint.Paint) (PaintKind, bool) {
 		return PaintLinear, true
 	case paint.RadialGradient:
 		return PaintRadial, true
+	case paint.ConicGradient:
+		return PaintConic, true
 	default:
 		return 0, false
 	}

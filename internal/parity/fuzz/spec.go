@@ -107,6 +107,7 @@ const (
 	PaintSolid PaintKind = iota
 	PaintLinear
 	PaintRadial
+	PaintConic
 )
 
 type PaintSpec struct {
@@ -116,6 +117,7 @@ type PaintSpec struct {
 	P1     geom.Point   `json:"p1,omitzero"`
 	Center geom.Point   `json:"center,omitzero"`
 	Radius float64      `json:"radius,omitempty"`
+	Angle  float64      `json:"angle,omitempty"`
 	Stops  []paint.Stop `json:"stops,omitempty"`
 }
 
@@ -125,14 +127,23 @@ func (p PaintSpec) Paint() paint.Paint {
 		return paint.LinearGradient{P0: p.P0, P1: p.P1, Stops: p.Stops}
 	case PaintRadial:
 		return paint.RadialGradient{Center: p.Center, Radius: p.Radius, Stops: p.Stops}
+	case PaintConic:
+		return paint.ConicGradient{Center: p.Center, Angle: p.Angle, Stops: p.Stops}
 	}
 	return paint.Solid{Color: p.Color}
+}
+
+// closed reports whether a conic gradient's first and last stops carry the same
+// colour, which is what makes its paint continuous across the seam ray — and so
+// whether a differential oracle applies to it at all. See gen.go's randConic.
+func (p PaintSpec) closed() bool {
+	return p.Stops[0].Color == p.Stops[len(p.Stops)-1].Color
 }
 
 func (p PaintSpec) validate() error {
 	switch p.Kind {
 	case PaintSolid:
-	case PaintLinear, PaintRadial:
+	case PaintLinear, PaintRadial, PaintConic:
 		if len(p.Stops) < 2 {
 			return fmt.Errorf("gradient has %d stops, need at least 2", len(p.Stops))
 		}

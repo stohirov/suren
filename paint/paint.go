@@ -128,6 +128,38 @@ type RadialGradient struct {
 
 func (RadialGradient) isPaint() {}
 
+// ConicGradient sweeps its stops around Center. The parameter is the angle from
+// Angle, measured in the direction of increasing atan2 — clockwise on screen,
+// since device y grows downward — wrapped into [0,1):
+//
+//	t = frac((atan2(qy-cy, qx-cx) - Angle) / 2π)
+//
+// # The seam is a discontinuity, and it is the whole correctness story
+//
+// Linear and radial gradients are continuous in the pixel position, so the
+// sub-LSB difference between the CPU's f64 parameter and the GPU's f32 one
+// produces a sub-LSB difference in colour, which the Δ≤1 floor absorbs. A conic
+// gradient wraps: crossing the ray at Angle takes t from just under 1 to just
+// over 0, so the colour jumps from the last stop to the first. Where those two
+// stops differ, the paint is DISCONTINUOUS along that ray, and a discontinuity
+// amplifies any input difference without bound — the same species of problem as
+// ColorDodge's unbounded derivative (internal/parity/fuzz), not a rounding
+// artifact a tolerance can own.
+//
+// It is bounded in EXTENT rather than in magnitude: only a pixel whose centre
+// falls within f32's ~1e-7 of the seam ray can land on opposite sides in the two
+// backends, so it is rare rather than mild. Give the gradient matching first and
+// last stops and the paint is continuous everywhere, the seam vanishes, and the
+// ordinary floor holds — which is what internal/parity/fuzz generates and what
+// the gradient-conic corpus entry pins.
+type ConicGradient struct {
+	Center geom.Point
+	Angle  float64
+	Stops  []Stop
+}
+
+func (ConicGradient) isPaint() {}
+
 func Interp(stops []Stop, t float64) Color {
 	if len(stops) == 0 {
 		return Color{}

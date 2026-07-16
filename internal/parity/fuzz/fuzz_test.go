@@ -217,6 +217,41 @@ func TestGeneratorOmitsIllConditionedModes(t *testing.T) {
 	}
 }
 
+// The paint axis's counterpart to the ill-conditioned check above, and it fails
+// in the same silent way if left out.
+//
+// randConic closes every loop it emits, because an open one is discontinuous
+// across its seam ray and so amplifies the f32-vs-f64 atan2 difference without
+// bound. A generator that started emitting open conics would not crash or look
+// wrong — it would produce perfectly valid scenes that pass thousands of seeds
+// and then fail one, at a magnitude set by two random stop colours rather than by
+// any arithmetic, with no budget that could honestly absorb it. That is a flake
+// with no fix, so the restriction is pinned here rather than trusted to gen.go's
+// comment.
+//
+// Both directions are checked: conic must be REACHABLE too, or the exclusion
+// would be trivially satisfied by never generating one at all.
+func TestGeneratorEmitsOnlyClosedConicGradients(t *testing.T) {
+	const seeds = 2000
+	conics := 0
+	for i := range seeds {
+		for j, n := range Generate(uint64(i) + 1).Nodes {
+			if n.Paint.Kind != PaintConic {
+				continue
+			}
+			conics++
+			if !n.Paint.closed() {
+				t.Fatalf("seed=0x%x node %d emitted an open conic gradient (stops %v..%v); its seam is a discontinuity no differential gate can own",
+					i+1, j, n.Paint.Stops[0].Color, n.Paint.Stops[len(n.Paint.Stops)-1].Color)
+			}
+		}
+	}
+	if conics == 0 {
+		t.Fatalf("no conic gradient over %d seeds; randConic is unreachable and the closed-loop rule above is vacuous", seeds)
+	}
+	t.Logf("conic gradients generated: %d over %d seeds", conics, seeds)
+}
+
 // The composite axis's counterpart to the ill-conditioned check above: it holds
 // gen.go to what it claims to generate, in both directions.
 //

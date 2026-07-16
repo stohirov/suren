@@ -77,6 +77,15 @@ func All() []Entry {
 	entries := []Entry{
 		{"solid", sample.W, sample.H, sample.Scene, parity.Quantized()},
 		{"gradient", sample.W, sample.H, sample.GradientScene, parity.Quantized()},
+		// The pair is the measurement, as with fallback-gradient. Closed is the
+		// conic gradient the floor covers on its merits — continuous paint, so the
+		// f32-vs-f64 atan2 difference stays sub-LSB. Seam contains a colour
+		// discontinuity along the ray at Angle, which no tolerance can own in
+		// general (see paint.ConicGradient); it holds at the floor because no pixel
+		// centre in THIS scene lands within f32's reach of that ray, and it is here
+		// to gate where the seam falls, not to suggest a seam is safe.
+		{"gradient-conic", sample.W, sample.H, func() *scene.Scene { return sample.ConicScene(false) }, parity.Quantized()},
+		{"gradient-conic-seam", sample.W, sample.H, func() *scene.Scene { return sample.ConicScene(true) }, parity.Quantized()},
 		{"many-nodes", 640, 360, func() *scene.Scene { return sample.ManyNodes(640, 360, 40, 24) }, parity.Identical()},
 		{"many-segments", 400, 300, func() *scene.Scene { return sample.ManySegments(400, 300, 300) }, parity.Quantized()},
 		{"clip-rect", 96, 96, sample.ClipRectScene, parity.Identical()},

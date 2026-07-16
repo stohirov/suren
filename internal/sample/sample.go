@@ -73,6 +73,68 @@ func GradientScene() *scene.Scene {
 	return c.Scene()
 }
 
+// ConicScene sweeps a conic gradient around a filled disc, a rotated-and-scaled
+// rect (so the node's inverse transform is exercised, not just the identity), and
+// a stroke.
+//
+// seam picks whether the first and last stops MATCH. That is the whole parameter
+// space worth having, because it decides whether the paint is continuous:
+//
+//   - closed (seam=false) wraps colour-to-colour, so the paint is continuous
+//     everywhere and the f32-vs-f64 difference in the atan2 parameter stays
+//     sub-LSB, exactly as it does for linear and radial. This is the case the
+//     Δ≤1 floor covers on its merits.
+//   - seam=true jumps from the last stop to the first across the ray at Angle.
+//     The paint is discontinuous there, so a pixel centre landing within f32's
+//     ~1e-7 of that ray can take opposite branches on the two backends and
+//     diverge by the full colour distance. See paint.ConicGradient.
+//
+// The seam variant renders at the floor anyway, and that is a fact about these
+// centres on this driver rather than a property — no pixel centre here falls that
+// close to the ray. It is in the corpus to hold the arithmetic that makes the
+// seam land in the same PLACE on both backends, which is a real thing to
+// regress; it is not evidence that the seam is safe in general.
+func ConicScene(seam bool) *scene.Scene {
+	c := render.NewCanvas()
+	first := paint.FromRGBA8(40, 44, 52, 255)
+	last := first
+	if seam {
+		last = paint.FromRGBA8(240, 200, 60, 255)
+	}
+	stops := []paint.Stop{
+		{Offset: 0, Color: first},
+		{Offset: 0.35, Color: paint.FromRGBA8(230, 120, 60, 255)},
+		{Offset: 0.7, Color: paint.RGBA(0.20, 0.72, 0.90, 0.75)},
+		{Offset: 1, Color: last},
+	}
+	c.FillColor(path.Rect(geom.RectXYWH(0, 0, W, H)), paint.FromRGBA8(250, 249, 246, 255))
+
+	c.Fill(path.Circle(geom.Pt(70, 90), 55), paint.ConicGradient{
+		Center: geom.Pt(70, 90),
+		Angle:  0.4,
+		Stops:  stops,
+	}, paint.NonZero)
+
+	c.Save()
+	c.Translate(170, 60)
+	c.Rotate(math.Pi / 5)
+	c.Scale(1.3, 0.8)
+	c.Fill(path.Rect(geom.RectXYWH(-30, -30, 60, 60)), paint.ConicGradient{
+		Center: geom.Pt(0, 0),
+		Angle:  -1.2,
+		Stops:  stops,
+	}, paint.NonZero)
+	c.Restore()
+
+	c.Stroke(path.Circle(geom.Pt(175, 135), 32), paint.ConicGradient{
+		Center: geom.Pt(175, 135),
+		Angle:  2.5,
+		Stops:  stops,
+	}, paint.Stroke{Width: 9, Join: path.RoundJoin})
+
+	return c.Scene()
+}
+
 func ManyNodes(w, h, cols, rows int) *scene.Scene {
 	c := render.NewCanvas()
 	c.FillColor(path.Rect(geom.RectXYWH(0, 0, float64(w), float64(h))), paint.FromRGBA8(20, 22, 28, 255))
