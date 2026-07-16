@@ -350,10 +350,14 @@ if rep.Lossy() {
   data, nested so they intersect), plus the solid/linear/radial fills, strokes,
   transforms, fill rules and rect clips that always worked.
 - **Reported** — conic and mesh paints, and any non-`SrcOver` composite. All three
-  are genuine format limits. **Porter-Duff is not expressible in SVG**, which
-  corrects this project's own earlier claim: `<feComposite>` combines filter
-  *inputs*, not an element against the canvas backdrop — that needs
-  `BackgroundImage`, which no browser implemented and SVG 2 removed.
+  are genuine format limits. **Porter-Duff is not expressible in SVG**: an element is
+  merged with its backdrop by source-over and nothing else, and no CSS or SVG property
+  changes that. The operator set exists only as canvas 2D's `globalCompositeOperation`
+  — never as an element property, not even in the Compositing Level 2 draft. This
+  corrects this project's own earlier claim that `<feComposite operator=…>` covers it:
+  `feComposite` combines filter *inputs*, not an element against the canvas backdrop.
+  Reaching the backdrop from a filter would need `BackgroundImage`, which no browser
+  ever implemented.
 - **Coupled, and this is the subtle one** — `mix-blend-mode` implies source-over, so
   a node's blend is only emitted when its composite is `SrcOver`. Emitting it under
   `Xor` would render Multiply-*over*: a different wrong answer, not a closer one.

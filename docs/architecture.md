@@ -272,48 +272,53 @@ that has never been run on to fail.
 |---|---|---|
 | `backend/cpu` | `cpu.Render(s, w, h) *image.RGBA` | The reference. f64 throughout. |
 | `backend/png` | `png.Encode(w, s, pxW, pxH) error` | `cpu.Render` + stdlib PNG. |
-| `backend/svg` | `svg.Encode(w, s, pxW, pxH) error` | Vector output. **Silently drops several features** — see below. |
+| `backend/svg` | `svg.Encode(w, s, pxW, pxH) (Report, error)` | Vector output. **Reports what it cannot express** — see below. |
 | `backend/gpu` | `gpu.NewRenderer(w, h)`, `gpu.NewRendererOn(backend, w, h)` | WebGPU compute. `Render` / `Sync` / `ReadRGBA` / `Resize` / `Release`. |
 | `backend/gpu` (present) | `gpu.RunPresent(title, w, h, frame)`, `gpu.NewPresenterWith(...)` | Native surface, no readback. `-tags gpupresent` only. Read `Format` / `PresentMode` rather than assuming either. |
 | `backend/window` | `window.Run(title, w, h, frame)`, `window.RunGPU(...)` | Ebiten loop. `RunGPU` goes through the readback bridge. |
 
-**The SVG backend's gaps are silent, and that is a known wart.** Read from
-`svg.go` rather than from the roadmap, the full list of what a scene loses on the
-way to SVG is:
+**The SVG backend's gaps used to be silent; now they are reported.** `Encode` returns a
+`Report` whose `Dropped` names the node index and the feature, and `Lossy()` is the
+one-line question. It still does not error — the document is written and the feature
+still dropped, exactly as before. The difference is that the caller is told. Read from
+`svg.go` rather than from this table, what a scene loses on the way to SVG is:
 
 | Feature | SVG output | Where |
 |---|---|---|
-| Conic paint | node **dropped entirely** | `paintRef` default case |
-| Mesh paint | node **dropped entirely** | `paintRef` default case |
-| Path clips (`Node.Clips`) | **ignored**; node still drawn, unclipped | `clipRef` reads only `n.Clip` |
-| Blend mode (`Node.Op`) | **ignored**; composites as Normal | never emitted |
-| Composite op (`Node.Composite`) | **ignored**; composites as SrcOver | never emitted |
-| Rect clip (`Node.Clip`) | honoured, as a `<clipPath><rect>` | `clipRef` |
+| Conic paint | node dropped, **reported** | `paintRef` default case |
+| Mesh paint | node dropped, **reported** | `paintRef` default case |
+| Composite op (`Node.Composite`) | not emitted, **reported** | `blendFor` |
+| Blend mode (`Node.Op`) | `style="mix-blend-mode:…"` — **only when `Composite == SrcOver`**; reported otherwise | `blendFor`, `writeNode` |
+| Path clips (`Node.Clips`) | nested `<clipPath>` with path data, so they intersect | `clipRef` |
+| Rect clip (`Node.Clip`) | `<clipPath><rect>` | `clipRef` |
 | Solid / linear / radial paint | honoured | `paintRef` |
 | Path, transform, stroke, fill rule | honoured | `writeNode` |
-
-None of these error. `paintRef` returns `(fillRef{}, false)` for a paint it cannot
-express and the caller skips the node; the clip and blend fields are simply never
-read.
+| `Node.Fallback` | ignored — a GPU exactness hint, not a rendering property | n/a |
 
 **The rows are not the same kind of failure**, which is the part worth internalizing:
 
-- The **conic and mesh** drops are *missing output* — SVG 1.1/2 genuinely have no
-  conic-gradient element (CSS does) or mesh primitive, so the format is the limit and
-  the node is visibly absent.
-- The **blend, composite and path-clip** rows are *wrong output* — a Multiply node
-  exports as Normal, a clipped node exports unclipped. The node is present, plausible
-  and incorrect. All three are expressible in SVG (`mix-blend-mode`, `<clipPath>` with
-  path data, `<feComposite operator=…>`) and are simply not emitted.
+- The **conic, mesh and composite** rows are *format limits* — SVG has no conic-gradient
+  element (CSS does) or mesh primitive, and **Porter-Duff is not expressible at all**:
+  SVG merges an element with its backdrop by source-over and offers no property to change
+  it. `<feComposite>` does not help; it combines filter *inputs*, not an element against
+  the backdrop. See [the roadmap](roadmap.md) for the full citation trail — including the
+  correction that this document once asserted the opposite.
+- **Blend is coupled to composite**, which a table of independent rows cannot say.
+  `mix-blend-mode` implies source-over, so a node with `Op=Multiply, Composite=Xor` cannot
+  have its blend emitted either: it would render Multiply-*over* — a different wrong
+  answer, not a closer one. Both axes drop together and the report names both.
 
-The SVG backend is **not part of the parity contract**: it emits vectors, not
-pixels, so there is nothing to diff at the channel level. It is gated by its own
-goldens (`backend/svg/testdata/golden` — two of them, neither exercising a clip, a
-blend mode or a conic). That is precisely why it drifted: it is the one output path
-the parity machine does not watch, and it accumulated five silent gaps while the two
-rasterizers were held to Δ≤1 over millions of executions. **The apparatus only
-protects what it is pointed at.** Tracked as [Phase 24](roadmap.md). Treat it as a
-convenience exporter for the honoured subset, not as a third renderer.
+Measured: **SVG cannot fully express 18 of the 43 corpus scenes; 25 encode losslessly.**
+
+The SVG backend is **not part of the parity contract**: it emits vectors, not pixels, so
+there is nothing to diff at the channel level. That is precisely why it drifted — it was
+the one output path the parity machine did not watch, and it accumulated five silent gaps
+while the two rasterizers were held to Δ≤1 over millions of executions. **The apparatus
+only protects what it is pointed at.** It is pointed at now: a conformance test per row, a
+corpus loss audit that fails if a scene's report changes without the table changing, and a
+reflection gate that fails the build if a `scene.Node` field is ever added without an SVG
+answer. Treat it as a convenience exporter for the honoured subset, not as a third
+renderer.
 
 ## Critical files
 

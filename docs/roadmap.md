@@ -1643,13 +1643,53 @@ are now recorded because each is one refactor away from becoming a real gap.
 **`Node.Composite` is not expressible in SVG.** This document filed it under "expressible and simply
 not emitted", mapping it to `<feComposite operator=…>`. That is wrong. `feComposite` combines two
 **filter inputs** inside a filter graph; it does not composite an element against the canvas
-backdrop. Doing that requires `BackgroundImage` as a filter input — which SVG 1.1 defined, **no
-browser ever implemented, and SVG 2 removed**. So `Composite` belongs beside conic and mesh as a
-**format limit**, not beside blend as an omission. The row moved class:
+backdrop. So `Composite` belongs beside conic and mesh as a **format limit**, not beside blend as an
+omission. The row moved class:
 
 | Feature | Class as recorded | Class as measured |
 |---|---|---|
 | Composite op (`Node.Composite`) | wrong output — expressible, not emitted | **wrong output — and NOT expressible.** Reported, not emitted. |
+
+##### The first version of this correction was itself unverified, and wrong
+
+Kept, because it is the sharpest entry in the file. The paragraph above originally closed with: "Doing
+that requires `BackgroundImage` as a filter input — which SVG 1.1 defined, **no browser ever
+implemented, and SVG 2 removed**." Three claims, none checked against the text, in the very commit
+whose subject is *asserting from knowledge instead of measuring*. Checked now:
+
+| Sub-claim | Verdict |
+|---|---|
+| `feComposite` combines filter inputs, not element-vs-backdrop | **Holds.** |
+| Reaching the backdrop needs `BackgroundImage` | **Holds.** SVG 1.1 §15.7: "an image snapshot of the canvas under the filter region at the time that the filter element was invoked". |
+| No browser ever implemented it | **Holds.** MDN: "`BackgroundImage` is not supported as a filter source in modern browsers" — it documents an `feImage` workaround. |
+| SVG 2 removed it | **False.** |
+
+SVG 2 removed its *entire* filters chapter, delegating to Filter Effects 1
+([changes K.2.18](https://www.w3.org/TR/SVG2/changes.html#filters): "Removed this chapter (replaced by
+Filter Effects specification"). And [Filter Effects 1](https://drafts.csswg.org/filter-effects-1/)
+still lists `BackgroundImage` in the `in` grammar today, redefined as "the back drop defined by the
+current **isolation group** behind the filter region". What was actually dropped is
+`enable-background`, the SVG 1.1 property that *armed* it —
+[Appendix A](https://drafts.csswg.org/filter-effects-1/#AccessBackgroundImage): "This specification
+does not support the enable-background property. UAs must support the `isolation` property instead."
+`BackgroundImage` was re-plumbed from `enable-background` onto `isolation` and then implemented by
+nobody. Still unreachable; **different reason than the one claimed**.
+
+The conclusion survived. The argument for it did not — and an argument that lands on the right answer
+by luck is the thing this phase exists to catch.
+
+**The load-bearing citation needs no filter at all.** SVG merges every element with its backdrop using
+**source-over and nothing else**, and offers no property to change it.
+[Compositing 1](https://www.w3.org/TR/compositing-1/) gives elements `mix-blend-mode`,
+`background-blend-mode` and `isolation` — blend, never composite. The Porter-Duff operators appear in
+CSS only as values of canvas 2D's `globalCompositeOperation`, and that is still true in the
+[Compositing **Level 2**](https://drafts.csswg.org/compositing-2/) editor's draft, which states the
+present model outright — "each element is rendered into its own buffer and is then merged with its
+backdrop using the Porter Duff **source-over** operator" — and puts element-level Porter-Duff in the
+*future* tense: "This specification **will** define a new compositing model… offering additional
+Porter Duff compositing operators." A draft that may change at any moment is not a format capability.
+That is why `Composite` is reported, and it is why the answer does not move if `BackgroundImage` is
+ever implemented.
 
 **And the blend row is coupled to the composite row — which a table of independent rows cannot
 say.** `mix-blend-mode` **implies source-over compositing**; CSS has no way to spell "multiply, but

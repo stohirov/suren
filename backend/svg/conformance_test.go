@@ -321,7 +321,7 @@ var svgFieldContract = map[string]string{
 	"Transform": "emitted as transform=matrix(…)",
 	"Paint":     "emitted (solid/linear/radial); reported (conic/mesh — no SVG primitive)",
 	"Op":        "emitted as mix-blend-mode when Composite==SrcOver; reported otherwise (mix-blend-mode implies source-over)",
-	"Composite": "reported (feComposite composites filter inputs, not the canvas backdrop; that needs BackgroundImage, which SVG 2 removed)",
+	"Composite": "reported (SVG merges an element with its backdrop by source-over only; the Porter-Duff set is canvas-2D-only. feComposite composites filter inputs, not the backdrop)",
 	"FillRule":  "emitted as fill-rule",
 	"Stroke":    "emitted as stroke-* attributes",
 	"Clip":      "emitted as <clipPath><rect>",
