@@ -34,22 +34,46 @@
 // The two backends round the same rule but compute at different precisions, and
 // only one of those precisions is close enough to the rounding decision to
 // matter. An 8-bit output is ~2.4 decimal digits. f64 carries ~15, so the CPU's
-// last-bit noise sits ~13 orders of magnitude below the .5 boundary it would have
-// to cross to change a pixel; f32 carries ~7, leaving the GPU only ~4-5 orders,
-// which a frame's worth of pixels does reach.
+// last-bit noise sits ~13 orders of magnitude below a TYPICAL .5 boundary; f32
+// carries ~7, leaving the GPU only ~4-5 orders, which a frame's worth of pixels
+// does reach. That is why the floor is f32's.
 //
-// That asymmetry is measurable, not theoretical. Go's spec permits fusing a*b+c
-// into an FMA and it does so on arm64 — verified — which makes the CPU
-// reference's arithmetic architecture-dependent in principle. It is not
-// observable in practice: pinning every hot expression with explicit float64()
-// conversions (geom.Matrix.Apply, raster/fill.go's SrcOver) reproduced all 21
-// CPU goldens bit-for-bit, ~4M channels, Δ=0. So the CPU reference is safe to
-// regenerate on any architecture, and pinning it would cost FMA throughput to buy
-// nothing. The same latitude on the GPU is NOT safe by the same argument
-// reversed, and that is 12d's problem: contraction is implementation-defined,
-// WGSL offers no way to forbid it, and f32 has the headroom to show it. If
-// Vulkan or DX12 diverge from Metal past the floor, contraction in the coverage
-// sweep, the gradient parameter, or the blend recompose is the first suspect.
+// # The headroom argument is about typical pixels, and it does not extend to ties
+//
+// Phase 13 stated the paragraph above as a law — "f64 has ~13 orders of headroom,
+// therefore the CPU reference cannot diverge" — and used it to decide that FMA
+// contraction, which Go performs on arm64 and not on amd64, need not be pinned.
+// That inference is unsound, and the correction is worth stating precisely
+// because the measurement behind it was never wrong.
+//
+// Headroom is a distance to a boundary. It protects a value that sits AWAY from
+// one. It offers nothing at a TIE, where the distance is zero: quantization is a
+// threshold, not a smooth map, so a perturbation there does not need to be large
+// enough to matter, only non-zero. ~13 orders below a boundary you are sitting
+// exactly on is still on it.
+//
+// Phase 13's experiment — pinning geom.Matrix.Apply and raster/fill.go's SrcOver
+// with explicit float64() conversions, reproducing all 21 CPU goldens bit-for-bit
+// over ~4M channels at Δ=0 — is REAL and still reproduces. It was true of the 21
+// scenes that existed. None of them contained a tie pixel, so the experiment
+// could not distinguish "headroom protects us" from "we got lucky", and it was
+// written down as the former. The corpus then grew 21 -> 43 and nobody re-ran the
+// question. paint.MeshAt, added two phases later, does contain a tie: at pixel
+// (75,96) of internal/sample.MeshScene the blue channel's true value is
+// 0.5 + 1.36e-17, so v*0xffff lands on 32767.5 exactly. Fused and unfused there
+// differ by one 8-bit level, and CI went red on the mesh golden the first time it
+// ran on amd64. See paint.MeshAt and Phase 13 in docs/roadmap.md.
+//
+// So the CPU reference is NOT free to fuse, and MeshAt now forbids it with
+// float64() conversions that paint.TestMeshAtDoesNotFuse pins on every
+// architecture. The lesson generalizes past FMA: a headroom argument is evidence
+// about the pixels you measured, never a proof about the pixels you have not.
+//
+// The same latitude on the GPU is NOT safe either, and that is 12d's problem:
+// contraction is implementation-defined, WGSL offers no way to forbid it, and f32
+// has the headroom to show it. If Vulkan or DX12 diverge from Metal past the
+// floor, contraction in the coverage sweep, the gradient parameter, or the blend
+// recompose is the first suspect.
 //
 //   - Budget (Δ>1) is a bug budget with an owner, not a free parameter. It is
 //     admitted only where a specific operation is known to diverge, and Why must

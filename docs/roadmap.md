@@ -981,7 +981,7 @@ Metal alone on Apple silicon, which the harness reports rather than glosses.
 arithmetic on different drivers. This section removes that variable, then provides an escape hatch
 for the cases where it can't.
 
-### Phase 13 — float determinism controls  ✅ (12d's on-device half remains)
+### Phase 13 — float determinism controls  ✅ (12d's on-device half remains; **the FMA finding was overturned by CI — see below**)
 
 **Two budgets retired, one semantic divergence killed, and two "obvious" fixes measured and
 rejected.** Every tolerance in the tree is now the quantization floor except one, which is measured.
@@ -1009,17 +1009,72 @@ rejected.** Every tolerance in the tree is now the quantization floor except one
       first tolerances in this tree retired by a fix rather than widened. Their stated reason was
       also **wrong**: the division never was the culprit, it only *amplified* a backdrop the two
       backends had quantized differently. Exactly 12c's Finding 1, now with the mechanism named.
-- [x] **FMA contraction — measured, then deliberately NOT pinned.** Go's spec permits fusing `a*b+c`
-      and **it does on arm64** (verified against `math.FMA`), so the CPU reference's arithmetic is
-      architecture-dependent in principle. It is not observable in practice: pinning every hot
-      expression with explicit `float64()` conversions (`geom.Matrix.Apply`, `raster/fill.go`'s
-      SrcOver) reproduced **all 21 CPU goldens bit-for-bit, ~4M channels, Δ=0**. The reason is
-      quantitative and now recorded in `contract.go`: 8-bit output is ~2.4 decimal digits, f64 carries
-      ~15, so the CPU's last-bit noise sits ~13 orders of magnitude below the rounding decision it
-      would have to cross. **f32 has only ~4–5 orders of headroom — which is why the GPU diverges and
-      the CPU cannot.** Pinning the CPU would cost FMA throughput to buy nothing. The same latitude on
-      the GPU is *not* safe by that argument reversed, WGSL offers no way to forbid contraction, and
-      that is now 12d's named first suspect.
+- [x] ~~**FMA contraction — measured, then deliberately NOT pinned.**~~ **OVERTURNED by CI's first
+      amd64 run (2026-07-16). The measurement was right; the law drawn from it was not.** Superseded
+      by the entry below — kept rather than deleted, because *how* a correct measurement produced a
+      wrong rule is the whole finding.
+
+      The original claim: Go fuses `a*b+c` on arm64 and not on amd64, so the CPU reference's
+      arithmetic is architecture-dependent in principle — but not in practice, because pinning every
+      hot expression with explicit `float64()` conversions (`geom.Matrix.Apply`, `raster/fill.go`'s
+      SrcOver) reproduced **all 21 CPU goldens bit-for-bit, ~4M channels, Δ=0**. Justified by
+      headroom: 8-bit output is ~2.4 decimal digits, f64 carries ~15, so the CPU's last-bit noise
+      sits ~13 orders of magnitude below the rounding decision it would have to cross.
+
+- [x] **FMA contraction — pinned in `paint.MeshAt`, after CI found the golden it breaks.** Phase 22's
+      CI landed and its first amd64 run went red: `TestGoldenCorpus/mesh`, **Δ=1 at pixel (75,96),
+      1/172800 channels**, deterministic. Everything else — the other 42 goldens, the 64-seed
+      differential, every property law — passed. The divergence is **`paint.MeshAt`**, which is dense
+      with `x*y + z*w`.
+
+      **The headroom argument is unsound, and this is the correction that matters.** Headroom is a
+      distance to a boundary; it protects a value sitting *away* from one and offers nothing at a
+      **tie**, where the distance is zero. Quantization is a threshold, not a smooth map: the
+      perturbation does not have to be big enough to matter, only non-zero. Measured at that pixel,
+      blue channel, true value by exact rational arithmetic:
+
+      | | value | `v*0xffff` | 16-bit | verdict |
+      |---|---|---|---|---|
+      | true | 0.5 + 1.36e-17 | 32767.5+ | 32768 | — |
+      | unfused (amd64, and now everywhere) | 0.5 | 32767.5 | **32768** | ✅ correct |
+      | fused (arm64, what shipped) | 0.5 − 1 ULP | 32767.49… | **32767** | ❌ wrong by one |
+
+      **And the polarity is the lesson, because it is backwards from the guess.** Fusion is the more
+      accurate operation in general — one rounding instead of two — so the natural reading is that
+      arm64 was right and portability would cost accuracy. It is the reverse: unfused lands **3×
+      closer** to the true value (1.36e-17 vs 4.19e-17) and on the correct side of the tie. There was
+      no trade to make. **The golden was recording a wrong pixel, and the fix is both deterministic
+      and more correct.** That is the mesh crack (Phase 16 / `MeshEps`) in a different key — more
+      precision made it worse, and the reference was the buggy one.
+
+      **Why Phase 13 was not sloppy, which is the uncomfortable part.** Its experiment is real and
+      still reproduces. `MeshAt` **did not exist** when it ran — mesh landed in `65bf558`, two phases
+      later — and none of the 21 scenes it measured contained a tie pixel. So the experiment could
+      not distinguish *"headroom protects us"* from *"we got lucky"*, and it was written down as the
+      former. The corpus then grew **21 → 43** and nobody re-ran the question. A measurement was
+      promoted to a law, and the law was never re-checked as the code grew under it.
+
+      **`math.FMA` was measured and rejected**, not argued away: it pins the fused (less accurate)
+      answer, and it costs **3.8× on amd64** (4.40 ms vs 1.16 ms, `BenchmarkMeshAt`) because Go
+      emulates it in software unless `GOAMD64>=v3`, which no library can require of its callers.
+      Forcing no-fusion with `float64()` costs **nothing measurable on either architecture** (arm64
+      1.20 vs 1.27 ms; amd64 1.15 vs 1.16 ms) and makes the two **byte-identical**.
+
+      **The gate is `paint.TestMeshAtDoesNotFuse`, and it fails on arm64 — deliberately.** A gate
+      that only fails on CI's amd64 is invisible to everyone developing on this machine, and deleting
+      a "redundant" `float64()` is a one-keystroke cleanup. It pins the blue channel's exact bits
+      (`0x3fe0000000000000`); injection-verified — removing the conversions fails on **arm64** with
+      `0x3fdfffffffffffff`, and passes on amd64, which cannot observe fusion at all. The two gates are
+      complements, not duplicates. `TestMeshFMAFixtureStraddlesTheTie` guards the guard: it asserts
+      the fixture still quantizes to exactly 32767.5, because a fixture edited off the tie would
+      leave the first test green and testing nothing.
+
+      **What is NOT pinned, and why that is now a stated risk rather than a proof.**
+      `geom.Matrix.Apply` and `raster/fill.go`'s SrcOver remain unpinned. Phase 13's bit-for-bit
+      result over 43 goldens on both architectures still holds for them — CI now checks it every
+      push, which is the only reason the claim is worth anything. But that is evidence about the
+      pixels measured, **never a proof about the pixels not yet written**. The next tie pixel in a
+      new scene is the same bug, and the thing that will find it is CI on amd64, not this argument.
 - [x] **Operation ordering — audited; one load-bearing divergence, kept deliberately.** Stop-table
       interpolation matches term-for-term. The signed-area sweep does **not**: `raster.go` runs one
       running total left-to-right across the whole row, while the shader collapses everything left of

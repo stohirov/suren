@@ -78,13 +78,28 @@ display itself is on-device only, and only Metal has run it.
 **CI runs the pure-Go core only, and says so.** The GPU suite has no runner —
 GitHub's Linux runners have no GPU and its macOS runners have no dependable Metal
 device — so the cross-backend parity gate is Metal-only and run by hand on
-darwin/arm64. Faking it would be worse than not having it. What CI does buy that a
-local run cannot is **amd64**: the 43 CPU goldens run on hardware that is not this
-one, which is [Phase 13](docs/roadmap.md)'s FMA claim checked rather than argued
-(Go fuses FMA on arm64; the claim is that f64's ~13 orders of headroom make it
-unobservable at 8 bits). It also turns two conventions into gates — the zero-dep
-quarantine and the glfw one — each with a step that proves the detector can still
-fail.
+darwin/arm64. Faking it would be worse than not having it. It also turns two
+conventions into gates — the zero-dep quarantine and the glfw one — each with a
+step that proves the detector can still fail.
+
+What CI buys that a local run cannot is **amd64**, and it earned its keep on the
+first run by going red. Go fuses `a*b+c` into an FMA on arm64 and not on amd64.
+[Phase 13](docs/roadmap.md) had measured that and deemed it unobservable, reasoning
+that f64's ~13 orders of headroom sit far below any 8-bit rounding decision. **That
+reasoning is unsound: headroom is a distance to a boundary, and it buys nothing at
+a tie.** One pixel of the `mesh` golden — (75,96), blue — has a true value of
+0.5 + 1.36e-17, so it quantizes to *exactly* 32767.5, the knife edge. Fused and
+unfused land on opposite sides. 42 of 43 goldens were bit-identical on amd64; that
+one was not.
+
+The polarity is the part worth reading, because it is backwards from the guess:
+fusion is the *more* accurate operation, so the natural conclusion is that arm64
+was right and portability costs accuracy. The reverse was true — the unfused value
+is **3× closer** to the truth and on the correct side of the tie, so **the golden
+had been recording a wrong pixel**, and a golden generated on one architecture can
+never see that. `paint.MeshAt` now forbids contraction outright; the fix is free
+(`math.FMA` was measured and rejected at **3.8× on amd64**), and the gate that
+holds it fails on **arm64**, where CI cannot look.
 
 Not implemented: patterns/images, group opacity/masks, an sRGB-vs-linear toggle.
 See [Features](#features).

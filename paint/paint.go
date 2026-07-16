@@ -289,24 +289,69 @@ const MeshEps = 1e-5
 // SKIPPED rather than divided by. That case is reachable from any caller and the
 // division would otherwise produce infinities that the inside test would then
 // compare, which is undefined behaviour dressed up as a colour.
+//
+// # The float64() conversions are load-bearing. Do not remove them.
+//
+// Every `float64(x*y)` below exists to ROUND that product before it is added,
+// which is what the Go spec gives you to forbid the compiler from contracting
+// `x*y + z` into a fused multiply-add. Go fuses on arm64 and does not on amd64,
+// so without them this function computes a DIFFERENT VALUE per architecture and
+// the mesh golden is portable only by luck. They look redundant. They are not,
+// and TestMeshAtDoesNotFuse fails on every architecture if they are deleted.
+//
+// Phase 13 predicted this was unobservable: f64 carries ~13 orders of magnitude
+// more precision than 8-bit output needs, so a 1-ULP difference cannot survive
+// quantization. That reasoning is wrong, and the mesh scene is where it broke.
+// Headroom is irrelevant AT A TIE. Quantization is a threshold, not a smooth map,
+// and a threshold has no headroom in front of it — the perturbation does not have
+// to be big enough to matter, only non-zero.
+//
+// Measured at pixel (75,96) of internal/sample.MeshScene, blue channel, with the
+// true value computed in exact rational arithmetic:
+//
+//	true    0.5 + 1.36e-17   (just ABOVE 1/2)  -> x*0xffff = 32767.5+ -> 32768
+//	unfused 0.5              (this code)       -> exactly  32767.5    -> 32768  ✓
+//	fused   0.5 - 1 ULP      (arm64 today)     ->          32767.49…  -> 32767  ✗
+//
+// And the polarity is the lesson, because the obvious guess is backwards. Fusion
+// is the MORE accurate operation in general — one rounding instead of two — so
+// the natural assumption is that the fused answer is right and portability costs
+// accuracy. It is the other way around here: unfused lands 3x closer to the true
+// value (1.36e-17 vs 4.19e-17) and on the correct side of the tie. There is no
+// trade. This code is both deterministic AND more correct, and the golden that
+// recorded the fused value recorded a WRONG PIXEL — which is the mesh crack's
+// lesson again, in a different key: see MeshEps above, where more precision also
+// made things worse and only the differential could see it. A golden generated on
+// one architecture cannot see this at all.
+//
+// math.FMA would pin the fused answer everywhere and was rejected on both counts:
+// it is the less accurate value here, and it costs 3.8x on amd64 because Go
+// emulates it in software unless GOAMD64>=v3, which no library can require of its
+// callers. Measured, both variants, both architectures — see Phase 13 in
+// docs/roadmap.md.
+//
+// raster.wgsl's meshColor stays a verbatim port of the TERM ORDER above. It
+// cannot port these conversions — WGSL has no way to forbid contraction — and it
+// does not need to: the GPU is f32 and gated at Δ≤1, which absorbs a 1-ULP flip.
+// This function is the CPU reference, and the reference is what must not move.
 func MeshAt(tris []MeshTriangle, q geom.Point) (Color, bool) {
 	for _, t := range tris {
 		a, b, c := t.V[0], t.V[1], t.V[2]
-		d := (b.P.Y-c.P.Y)*(a.P.X-c.P.X) + (c.P.X-b.P.X)*(a.P.Y-c.P.Y)
+		d := float64((b.P.Y-c.P.Y)*(a.P.X-c.P.X)) + float64((c.P.X-b.P.X)*(a.P.Y-c.P.Y))
 		if d == 0 {
 			continue
 		}
-		l0 := ((b.P.Y-c.P.Y)*(q.X-c.P.X) + (c.P.X-b.P.X)*(q.Y-c.P.Y)) / d
-		l1 := ((c.P.Y-a.P.Y)*(q.X-c.P.X) + (a.P.X-c.P.X)*(q.Y-c.P.Y)) / d
+		l0 := (float64((b.P.Y-c.P.Y)*(q.X-c.P.X)) + float64((c.P.X-b.P.X)*(q.Y-c.P.Y))) / d
+		l1 := (float64((c.P.Y-a.P.Y)*(q.X-c.P.X)) + float64((a.P.X-c.P.X)*(q.Y-c.P.Y))) / d
 		l2 := 1 - l0 - l1
 		if l0 < -MeshEps || l1 < -MeshEps || l2 < -MeshEps {
 			continue
 		}
 		return Color{
-			R: l0*a.Color.R + l1*b.Color.R + l2*c.Color.R,
-			G: l0*a.Color.G + l1*b.Color.G + l2*c.Color.G,
-			B: l0*a.Color.B + l1*b.Color.B + l2*c.Color.B,
-			A: l0*a.Color.A + l1*b.Color.A + l2*c.Color.A,
+			R: float64(float64(l0*a.Color.R)+float64(l1*b.Color.R)) + float64(l2*c.Color.R),
+			G: float64(float64(l0*a.Color.G)+float64(l1*b.Color.G)) + float64(l2*c.Color.G),
+			B: float64(float64(l0*a.Color.B)+float64(l1*b.Color.B)) + float64(l2*c.Color.B),
+			A: float64(float64(l0*a.Color.A)+float64(l1*b.Color.A)) + float64(l2*c.Color.A),
 		}, true
 	}
 	return Color{}, false
