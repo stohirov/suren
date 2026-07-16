@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/stohirov/sukho/geom"
+	"github.com/stohirov/suren/geom"
 )
 
 func fillPoly(w, h int, rule FillRule, polys ...[]geom.Point) [][]float64 {

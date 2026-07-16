@@ -5,9 +5,9 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/stohirov/sukho/backend/cpu"
-	"github.com/stohirov/sukho/internal/sample"
-	"github.com/stohirov/sukho/scene"
+	"github.com/stohirov/suren/backend/cpu"
+	"github.com/stohirov/suren/internal/sample"
+	"github.com/stohirov/suren/scene"
 )
 
 const (

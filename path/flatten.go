@@ -3,7 +3,7 @@ package path
 import (
 	"math"
 
-	"github.com/stohirov/sukho/geom"
+	"github.com/stohirov/suren/geom"
 )
 
 const DefaultTolerance = 0.25

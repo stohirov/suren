@@ -4,11 +4,11 @@ import (
 	"image"
 	"testing"
 
-	"github.com/stohirov/sukho/backend/cpu"
-	"github.com/stohirov/sukho/internal/corpus"
-	"github.com/stohirov/sukho/internal/parity"
-	"github.com/stohirov/sukho/internal/sample"
-	"github.com/stohirov/sukho/scene"
+	"github.com/stohirov/suren/backend/cpu"
+	"github.com/stohirov/suren/internal/corpus"
+	"github.com/stohirov/suren/internal/parity"
+	"github.com/stohirov/suren/internal/sample"
+	"github.com/stohirov/suren/scene"
 )
 
 func TestDeviceInit(t *testing.T) {

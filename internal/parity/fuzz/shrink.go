@@ -1,8 +1,8 @@
 package fuzz
 
 import (
-	"github.com/stohirov/sukho/geom"
-	"github.com/stohirov/sukho/paint"
+	"github.com/stohirov/suren/geom"
+	"github.com/stohirov/suren/paint"
 )
 
 // Fails reports whether a candidate still exhibits the divergence under

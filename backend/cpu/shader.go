@@ -3,9 +3,9 @@ package cpu
 import (
 	"math"
 
-	"github.com/stohirov/sukho/geom"
-	"github.com/stohirov/sukho/paint"
-	"github.com/stohirov/sukho/raster"
+	"github.com/stohirov/suren/geom"
+	"github.com/stohirov/suren/paint"
+	"github.com/stohirov/suren/raster"
 )
 
 type gradShader struct {

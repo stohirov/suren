@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/stohirov/sukho/geom"
+	"github.com/stohirov/suren/geom"
 )
 
 func tri(p0, p1, p2 geom.Point, c0, c1, c2 Color) MeshTriangle {

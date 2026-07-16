@@ -12,10 +12,10 @@
 package corpus
 
 import (
-	"github.com/stohirov/sukho/internal/parity"
-	"github.com/stohirov/sukho/internal/sample"
-	"github.com/stohirov/sukho/paint"
-	"github.com/stohirov/sukho/scene"
+	"github.com/stohirov/suren/internal/parity"
+	"github.com/stohirov/suren/internal/sample"
+	"github.com/stohirov/suren/paint"
+	"github.com/stohirov/suren/scene"
 )
 
 type Entry struct {

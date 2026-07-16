@@ -4,9 +4,9 @@ import (
 	"image"
 	"testing"
 
-	"github.com/stohirov/sukho/internal/sample"
-	"github.com/stohirov/sukho/raster"
-	"github.com/stohirov/sukho/scene"
+	"github.com/stohirov/suren/internal/sample"
+	"github.com/stohirov/suren/raster"
+	"github.com/stohirov/suren/scene"
 )
 
 func oldRender(img *image.RGBA, s *scene.Scene) {

@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/stohirov/sukho/internal/parity"
+	"github.com/stohirov/suren/internal/parity"
 )
 
 var update = flag.Bool("update", false, "regenerate golden files")

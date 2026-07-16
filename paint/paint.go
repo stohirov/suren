@@ -1,7 +1,7 @@
 package paint
 
-import "github.com/stohirov/sukho/geom"
-import "github.com/stohirov/sukho/path"
+import "github.com/stohirov/suren/geom"
+import "github.com/stohirov/suren/path"
 
 type FillRule uint8
 

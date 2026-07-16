@@ -33,9 +33,9 @@ package gpu
 import (
 	"image"
 
-	"github.com/stohirov/sukho/backend/cpu"
-	"github.com/stohirov/sukho/raster"
-	"github.com/stohirov/sukho/scene"
+	"github.com/stohirov/suren/backend/cpu"
+	"github.com/stohirov/suren/raster"
+	"github.com/stohirov/suren/scene"
 )
 
 // Stats reports what the last frame did. FallbackTiles out of Tiles is "how

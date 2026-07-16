@@ -4,8 +4,8 @@ import (
 	"image"
 	"image/color"
 
-	"github.com/stohirov/sukho/geom"
-	"github.com/stohirov/sukho/path"
+	"github.com/stohirov/suren/geom"
+	"github.com/stohirov/suren/path"
 )
 
 func Stroke(dst *image.RGBA, p path.Path, m geom.Matrix, s path.Stroker, c color.Color) {

@@ -3,9 +3,9 @@ package gpu
 import (
 	"testing"
 
-	"github.com/stohirov/sukho/backend/cpu"
-	"github.com/stohirov/sukho/internal/corpus"
-	"github.com/stohirov/sukho/internal/parity"
+	"github.com/stohirov/suren/backend/cpu"
+	"github.com/stohirov/suren/internal/corpus"
+	"github.com/stohirov/suren/internal/parity"
 )
 
 // Cross-backend reconciliation (Phase 12d).

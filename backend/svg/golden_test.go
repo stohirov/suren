@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stohirov/sukho/internal/goldentest"
-	"github.com/stohirov/sukho/internal/sample"
+	"github.com/stohirov/suren/internal/goldentest"
+	"github.com/stohirov/suren/internal/sample"
 )
 
 func TestGoldenSample(t *testing.T) {

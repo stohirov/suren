@@ -3,7 +3,7 @@ package corpus
 import (
 	"testing"
 
-	"github.com/stohirov/sukho/paint"
+	"github.com/stohirov/suren/paint"
 )
 
 func TestEntriesAreWellFormed(t *testing.T) {

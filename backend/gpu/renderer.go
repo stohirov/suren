@@ -4,10 +4,10 @@ import (
 	"image"
 
 	"github.com/cogentcore/webgpu/wgpu"
-	"github.com/stohirov/sukho/backend/cpu"
-	"github.com/stohirov/sukho/raster"
-	"github.com/stohirov/sukho/render"
-	"github.com/stohirov/sukho/scene"
+	"github.com/stohirov/suren/backend/cpu"
+	"github.com/stohirov/suren/raster"
+	"github.com/stohirov/suren/render"
+	"github.com/stohirov/suren/scene"
 )
 
 var _ render.Renderer = (*Renderer)(nil)

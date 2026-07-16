@@ -4,10 +4,10 @@ import (
 	"image"
 	"testing"
 
-	"github.com/stohirov/sukho/backend/cpu"
-	"github.com/stohirov/sukho/internal/parity"
-	"github.com/stohirov/sukho/internal/parity/props"
-	"github.com/stohirov/sukho/scene"
+	"github.com/stohirov/suren/backend/cpu"
+	"github.com/stohirov/suren/internal/parity"
+	"github.com/stohirov/suren/internal/parity/props"
+	"github.com/stohirov/suren/scene"
 )
 
 // t is a testing.TB so the differential fuzz target (which holds a *testing.F)

@@ -3,7 +3,7 @@ package gpu
 import (
 	"testing"
 
-	"github.com/stohirov/sukho/paint"
+	"github.com/stohirov/suren/paint"
 )
 
 // TestPackFlagsRoundTrip exercises packFlags over its ENTIRE domain — all 16x16

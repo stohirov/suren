@@ -6,11 +6,11 @@ import (
 	"math"
 	"time"
 
-	"github.com/stohirov/sukho/backend/window"
-	"github.com/stohirov/sukho/geom"
-	"github.com/stohirov/sukho/paint"
-	"github.com/stohirov/sukho/path"
-	"github.com/stohirov/sukho/render"
+	"github.com/stohirov/suren/backend/window"
+	"github.com/stohirov/suren/geom"
+	"github.com/stohirov/suren/paint"
+	"github.com/stohirov/suren/path"
+	"github.com/stohirov/suren/render"
 )
 
 const (
@@ -26,10 +26,10 @@ func main() {
 	center := geom.Pt(w/2, h/2)
 
 	run := window.Run
-	title := "sukho — interactive (cpu)"
+	title := "suren — interactive (cpu)"
 	if *useGPU {
 		run = window.RunGPU
-		title = "sukho — interactive (gpu)"
+		title = "suren — interactive (gpu)"
 	}
 
 	err := run(title, w, h, func(c *render.Canvas) {

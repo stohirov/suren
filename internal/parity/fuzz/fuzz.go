@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stohirov/sukho/internal/parity"
-	"github.com/stohirov/sukho/scene"
+	"github.com/stohirov/suren/internal/parity"
+	"github.com/stohirov/suren/scene"
 )
 
 // RenderFunc matches props.RenderFunc structurally. The two packages declare it

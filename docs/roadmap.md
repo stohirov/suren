@@ -1,4 +1,30 @@
-# sukho — native-GPU renderer plan
+# suren — native-GPU renderer plan
+
+> **What this document is.** This is the project's lab notebook, kept verbatim
+> rather than summarized. It was written as a plan and it became a record: each
+> phase carries what was measured, what the measurement overturned, and what was
+> tried and reverted. It is the source of truth for what exists and what does
+> not.
+>
+> **Completed phases are kept for their measurements, not as status.** A ✅ here
+> does not mean "shipped, move on" — it means the numbers under it are the
+> evidence for a claim made elsewhere in the docs. The reverted work is kept for
+> the same reason: the precomputed-backdrop pass (Phase 8) is a full
+> implementation that was measured and removed, and that measurement is why the
+> current design is what it is. Deleting it would leave the design unexplained.
+> Several findings here also record a prediction this project got *wrong* — the
+> mesh crack, where the CPU reference was the buggy backend, is the clearest —
+> and those are the most useful entries in the file.
+>
+> **⏳ means not done.** Phase 6b (native surface present), Phases 17–22, and
+> 12d's non-Apple coverage are unbuilt or unrun. The register throughout is
+> deliberate: where this project has not verified something, it says so rather
+> than passing quietly.
+>
+> Reading order for a newcomer: [README](../README.md) →
+> [architecture](architecture.md) → [correctness](correctness.md) → this file.
+> The narrative distillation of Sections A/B lives in
+> [correctness.md](correctness.md); this file is the primary record it cites.
 
 The CPU vector engine (retained scene → AA rasterizer → PNG/SVG/window, gradients,
 strokes, clips) is **complete**. That engine's CPU-bound frame time — logged by the
@@ -281,6 +307,20 @@ only when the scene changes; a static scene still skips upload+dispatch via 7c.
 - [ ] **Skip `buildTiles` on unchanged scene** (7c refinement): fingerprint before the tile
       build and reuse last frame's tile slices — removes the coarse-pass encode cost on static
       scenes (restores the ~0.5 ms static frame).
+      *Measured cost of not doing this (2026-07-16, M4/Metal, many-nodes 1280×720):* the
+      static frame is now **0.76 ms**, not 7c's 0.49 ms, and `BenchmarkEncodeManyNodes` is
+      **0.76 ms** — i.e. an unchanged frame is *entirely* `EncodeInto`, since 7c already skips
+      the upload and the dispatch. This phase's segment scatter (encode 433 → ~750 µs) is the
+      whole difference, exactly as predicted above. Nothing regressed; this is the known trade,
+      recorded so the next reader does not re-derive it.
+      The fix is a reordering, and `fingerprint()` does not stand in its way: it hashes
+      dims + `Segments` + `Nodes` + `Stops` + `FallbackTiles` and **never reads the tile
+      slices**. It is only *sequenced* after `buildTiles()` in `EncodeInto`, so `Render`'s skip
+      check cannot fire until the scatter is already paid. Moving the hash (and
+      `markFallbackTiles`, whose output it covers and which needs only node bboxes and
+      `NTilesX/Y`) above `buildTiles`, then reusing last frame's tile slices on a match, is
+      what restores ~0.5 ms. Note `FallbackTiles` must stay in the hash regardless — Phase 14's
+      reason still holds: toggling the mark leaves `Segments`/`Nodes`/`Stops` byte-identical.
 - [ ] **GPU coarse pass** if the CPU scatter ever dominates the frame for changing scenes.
 
 **Done when (baseline):** parity holds on the pathological scene **and** all existing scenes,
@@ -480,6 +520,9 @@ Section C (features — each uses A as its gate, B where exactness is at risk)
   19 sRGB vs linear toggle ── merges Part I's deferred sRGB item; interacts with 6b surface
   20 stroking parity audit ── mostly CPU-done; question is the GPU expansion story
   21 unified scene/command encoding ── refactor; 15–20 make the duplication expensive first
+  24 SVG conformance audit ── independent of all of the above; NOT a parity question,
+     which is why it drifted: five silent gaps, three of them wrong output rather than
+     missing output (a Multiply node exports as Normal)
 
 Section D (observability — build alongside C, not after)
   22 per-stage timing + tile occupancy + visual-diff overlay + equal-correctness bench
@@ -1342,6 +1385,62 @@ construction.
 
 **Done when:** both backends render the full corpus from one shared encoded representation, parity
 unchanged, with feature logic no longer duplicated across `backend/cpu` and `backend/gpu`.
+
+### Phase 24 — SVG backend conformance audit  ⏳ planned
+
+Found while writing the release docs (2026-07-16), by reading `svg.go` rather than trusting this
+file's own account of it. The roadmap had recorded the conic drop twice (Phase 16, and the standing
+path-clip caveat) as "the SVG backend drops any paint it cannot express" — which undercounted the
+problem and, more importantly, **misclassified it**.
+
+**The distinction that makes this a phase and not a caveat: dropping a node it cannot express and
+mis-rendering a node it CAN are different failures.** A dropped conic is incomplete output — SVG
+1.1/2 genuinely have no conic or mesh primitive, so the format is the limit and the node is visibly
+absent. But `Node.Op` and `Node.Composite` are simply **never read**, so a Multiply node exports as
+**Normal**: a node that is present, plausible, and **wrong**. Nothing in the output says so. That is
+the same species of problem as 12d's `RequestAdapterOptions.BackendType` — an API that quietly
+answers a different question than the one it was asked.
+
+The full list, read from the code:
+
+| Feature | Today | Class |
+|---|---|---|
+| Blend mode (`Node.Op`) | **ignored — exports as Normal** | **wrong output** |
+| Composite op (`Node.Composite`) | **ignored — exports as SrcOver** | **wrong output** |
+| Path clips (`Node.Clips`) | **ignored — node drawn unclipped** | **wrong output** |
+| Conic paint | node dropped (`paintRef` default) | missing output (format limit) |
+| Mesh paint | node dropped (`paintRef` default) | missing output (format limit) |
+| Rect clip (`Node.Clip`) | honoured | ok |
+| Solid / linear / radial paint | honoured | ok |
+| Path, transform, stroke, fill rule | honoured | ok |
+
+Note the first three are **expressible in SVG** and simply are not emitted: `mix-blend-mode` covers
+the W3C separable set, `<clipPath>` takes arbitrary path data (the rect case already builds one),
+and the Porter-Duff operators map to `<feComposite operator=…>`. These are omissions, not format
+limits.
+
+- [ ] **Decide the contract and write it down.** Two defensible answers, and the current behaviour
+      is neither: (a) *emit it* — `mix-blend-mode` for blend, `<clipPath>` with path data for
+      `Node.Clips`, and an explicit decision about `<feComposite>`; or (b) *refuse it* — return an
+      error, or a reported list of dropped features, so a caller learns its scene did not survive.
+      What is not defensible is silence, which is what ships today.
+- [ ] **Nothing currently tests any of this.** `backend/svg` has 6 tests and 2 goldens
+      (`sample.svg`, `gradient.svg`), and **not one mentions a clip, a blend mode, or a conic** —
+      verified by grep. Every gap above is not merely unfixed but unobserved, so the first commit
+      here is a test that fails.
+- [ ] **Audit exhaustively over the scene model, not over the paint switch.** The conic drop was
+      found because someone added conic; the blend drop was found by reading the file much later.
+      Enumerate every field of `scene.Node` against what `writeNode` actually reads — that is the
+      check that would have caught all five at once.
+
+**Not a parity question.** SVG emits vectors, not pixels, so there is nothing to diff at the channel
+level and none of this belongs to the tolerance contract. It gets its own goldens. That is precisely
+why it drifted: **the SVG backend is the one output path the parity machine does not watch**, and it
+accumulated five silent gaps while the two rasterizers were held to Δ≤1 over millions of executions.
+The apparatus only protects what it is pointed at.
+
+**Done when:** every `scene.Node` field is either honoured by the SVG backend or reported to the
+caller, with a test per row of the table above, and the contract is written down rather than implied.
 
 ---
 

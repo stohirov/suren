@@ -1,4 +1,4 @@
-// Package parity defines the correctness contract between sukho's renderers and
+// Package parity defines the correctness contract between suren's renderers and
 // the harness that enforces it.
 //
 // Correctness in this project is not "looks right" — it is parity: the GPU
@@ -55,9 +55,32 @@
 //     admitted only where a specific operation is known to diverge, and Why must
 //     name that operation — Validate rejects a budget that does not. New
 //     features may not silently widen a gate: raising a tolerance means writing
-//     down which arithmetic forced it. The only budgets today are the two
-//     division-based blend modes, where f32-vs-f64 divergence is amplified
-//     through the min(1,·) clamp (ColorDodge Δ≤2, ColorBurn Δ≤3).
+//     down which arithmetic forced it.
+//
+// # What carries a budget today
+//
+// The corpus carries NONE: every entry is Identical() or Quantized(). It once
+// held two — ColorDodge Δ≤2 and ColorBurn Δ≤3, blamed on the min(1,·) clamp of
+// their division-based blend — and Phase 13 RETIRED both by fixing the
+// divergence rather than widening anything. They were the first tolerances in
+// this tree retired by a fix. Their stated reason had also been wrong: the
+// division never was the culprit, it only AMPLIFIED a backdrop the two backends
+// had quantized differently, which pinning the shader's per-node rounding
+// removed. Both now hold the ordinary floor. A budget that holds for the wrong
+// reason is a budget waiting to break, so the mechanism is named here rather
+// than the symptom.
+//
+// Two budgets survive anywhere in the tree, both Budget(2) and both on
+// GENERATED scenes rather than hand-written ones:
+//
+//   - props.assocTol — compositing associativity cannot be exact, because the
+//     split render quantizes its intermediate composite to 8 bits where the
+//     whole render keeps full precision. Measured: 14/16 seeds Δ=1, 2/16 Δ=2.
+//   - fuzz.amplifiedBlend — an amplifying operation (a blend mode with
+//     dB/dCb>1, or a non-SrcOver Porter-Duff operator whose unpremultiply
+//     divides by a backdrop alpha the operator itself drove toward zero) clears
+//     the rounding decision its 1-LSB f32-vs-f64 input would otherwise vanish
+//     under. Held flat at Δ≤2 over 531622 differential executions.
 //
 // # Two comparison modes, named
 //

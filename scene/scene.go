@@ -1,9 +1,9 @@
 package scene
 
 import (
-	"github.com/stohirov/sukho/geom"
-	"github.com/stohirov/sukho/paint"
-	"github.com/stohirov/sukho/path"
+	"github.com/stohirov/suren/geom"
+	"github.com/stohirov/suren/paint"
+	"github.com/stohirov/suren/path"
 )
 
 // Fallback marks a node whose GPU rendering is not trusted to be exact. Every

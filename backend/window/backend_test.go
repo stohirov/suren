@@ -4,10 +4,10 @@ import (
 	"image"
 	"testing"
 
-	"github.com/stohirov/sukho/backend/cpu"
-	"github.com/stohirov/sukho/backend/gpu"
-	"github.com/stohirov/sukho/internal/parity"
-	"github.com/stohirov/sukho/internal/sample"
+	"github.com/stohirov/suren/backend/cpu"
+	"github.com/stohirov/suren/backend/gpu"
+	"github.com/stohirov/suren/internal/parity"
+	"github.com/stohirov/suren/internal/sample"
 )
 
 func TestBackendParityAndResize(t *testing.T) {

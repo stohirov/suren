@@ -9,9 +9,9 @@ import (
 	"math"
 	"os"
 
-	"github.com/stohirov/sukho/geom"
-	"github.com/stohirov/sukho/path"
-	"github.com/stohirov/sukho/raster"
+	"github.com/stohirov/suren/geom"
+	"github.com/stohirov/suren/path"
+	"github.com/stohirov/suren/raster"
 )
 
 var (

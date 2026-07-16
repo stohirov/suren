@@ -5,8 +5,8 @@ import (
 	"image/color"
 	"testing"
 
-	"github.com/stohirov/sukho/geom"
-	"github.com/stohirov/sukho/path"
+	"github.com/stohirov/suren/geom"
+	"github.com/stohirov/suren/path"
 )
 
 func TestStrokeComposites(t *testing.T) {

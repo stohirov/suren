@@ -1,6 +1,6 @@
 package path
 
-import "github.com/stohirov/sukho/geom"
+import "github.com/stohirov/suren/geom"
 
 const kappa = 0.5522847498307936
 

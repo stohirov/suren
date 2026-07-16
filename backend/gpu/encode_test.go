@@ -3,7 +3,7 @@ package gpu
 import (
 	"testing"
 
-	"github.com/stohirov/sukho/internal/sample"
+	"github.com/stohirov/suren/internal/sample"
 )
 
 func TestEncodeSolidScene(t *testing.T) {

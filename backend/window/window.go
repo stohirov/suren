@@ -6,10 +6,10 @@ import (
 	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
-	"github.com/stohirov/sukho/backend/cpu"
-	"github.com/stohirov/sukho/backend/gpu"
-	"github.com/stohirov/sukho/render"
-	"github.com/stohirov/sukho/scene"
+	"github.com/stohirov/suren/backend/cpu"
+	"github.com/stohirov/suren/backend/gpu"
+	"github.com/stohirov/suren/render"
+	"github.com/stohirov/suren/scene"
 )
 
 type backend interface {

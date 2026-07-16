@@ -4,8 +4,8 @@ import (
 	"image"
 	"testing"
 
-	"github.com/stohirov/sukho/internal/sample"
-	"github.com/stohirov/sukho/raster"
+	"github.com/stohirov/suren/internal/sample"
+	"github.com/stohirov/suren/raster"
 )
 
 // TestTileMaskConfinesWrites pins Renderer.Tiles' promise: it leaves every

@@ -3,7 +3,7 @@ package raster
 import (
 	"math"
 
-	"github.com/stohirov/sukho/geom"
+	"github.com/stohirov/suren/geom"
 )
 
 type FillRule uint8

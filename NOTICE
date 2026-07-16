@@ -1,0 +1,144 @@
+suren
+Copyright 2026 Sukhrob Tokhirov
+
+This product includes software developed by Sukhrob Tokhirov.
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+================================================================================
+Third-party dependencies
+================================================================================
+
+suren's core modules take no third-party dependencies. The packages geom, path,
+paint, raster, scene, render, backend/cpu and backend/png are pure Go and depend
+only on the standard library, so a build that uses only those pulls in nothing
+listed below.
+
+The dependencies here are reached only through the two quarantined modules,
+each of which has its own go.mod:
+
+  github.com/stohirov/suren/backend/gpu      (cgo; links wgpu-native)
+  github.com/stohirov/suren/backend/window   (cgo; links a display library)
+
+--------------------------------------------------------------------------------
+github.com/cogentcore/webgpu v0.23.0
+--------------------------------------------------------------------------------
+Go bindings for WebGPU. Required by backend/gpu.
+
+License: Apache License 2.0.
+  Verified from the LICENSE file in the module (module cache, v0.23.0), which
+  carries the Apache-2.0 terms.
+
+  FLAGGED: that LICENSE file states the Apache-2.0 terms but does not fill in a
+  copyright holder — it ends at "END OF TERMS AND CONDITIONS" with no appendix
+  and no "Copyright <year> <owner>" line, and the project README states no
+  copyright either. The license is unambiguous; the holder is not recorded
+  upstream, so no holder is asserted here.
+
+This module vendors prebuilt static libraries (wgpu/lib/<os>/<arch>/
+libwgpu_native.a) which backend/gpu statically links via cgo. Their provenance
+and terms are below.
+
+--------------------------------------------------------------------------------
+wgpu-native (github.com/gfx-rs/wgpu-native)
+--------------------------------------------------------------------------------
+The native WebGPU implementation (Vulkan / Metal / D3D12 / GL). Not a Go module
+dependency: it enters the build as the prebuilt libwgpu_native.a static archives
+vendored inside cogentcore/webgpu, and is statically linked into any binary that
+imports backend/gpu.
+
+License: dual-licensed Apache License 2.0 OR MIT, at the user's option.
+  Verified from the upstream repository (github.com/gfx-rs/wgpu-native), which
+  publishes both LICENSE.APACHE and LICENSE.MIT.
+
+  FLAGGED: the vendored .a archives inside cogentcore/webgpu@v0.23.0 carry no
+  license file, copyright notice, or version stamp of their own. The terms above
+  are the upstream project's, read from upstream — not from the binaries as
+  shipped. The exact wgpu-native revision these archives were built from is not
+  recorded in the module; the README states only that they are built via the
+  repository's own GitHub Actions workflow. If precise provenance matters for
+  your distribution, pin and rebuild from source rather than relying on this
+  attribution.
+
+--------------------------------------------------------------------------------
+webgpu.h (github.com/webgpu-native/webgpu-headers)
+--------------------------------------------------------------------------------
+The standard WebGPU C API header, vendored at wgpu/lib/webgpu.h inside
+cogentcore/webgpu and included by cgo when building backend/gpu.
+
+License: BSD 3-Clause.
+  Verified from the header's own SPDX identifier, read from the vendored file:
+
+    Copyright 2019-2023 WebGPU-Native developers
+    SPDX-License-Identifier: BSD-3-Clause
+
+  The companion wgpu/lib/wgpu.h (wgpu-native's own extension header) carries no
+  copyright or SPDX header of its own; it is part of wgpu-native and is covered
+  by that project's terms above.
+
+--------------------------------------------------------------------------------
+github.com/hajimehoshi/ebiten/v2 v2.9.9
+--------------------------------------------------------------------------------
+The windowing/display library behind backend/window. Required by backend/window
+only.
+
+License: Apache License 2.0.
+  Verified from the LICENSE file in the module (module cache, v2.9.9).
+
+Reached through the same module, as its dependencies. Several are linked only on
+certain platforms; the applicable set was read from `go list -deps` per GOOS
+rather than from the go.mod require list, which over-reports.
+
+  Linked on every platform:
+
+    github.com/ebitengine/purego v0.9.0        Apache License 2.0
+    github.com/ebitengine/hideconsole v1.0.0   Apache License 2.0
+        Both verified from the LICENSE file in each module.
+
+    golang.org/x/sync v0.17.0                  BSD 3-Clause
+        Verified from the module's LICENSE file:
+        "Copyright 2009 The Go Authors."
+
+  Linked on Linux and Windows only:
+
+    golang.org/x/sys v0.36.0                   BSD 3-Clause
+        Verified from the module's LICENSE file:
+        "Copyright 2009 The Go Authors."
+
+  Linked on Linux only (X11):
+
+    github.com/jezek/xgb v1.1.1                BSD 3-Clause
+        Verified from the module's LICENSE file:
+        "Copyright (c) 2009 The XGB Authors. All rights reserved."
+
+  Declared as an indirect requirement for mobile targets, not linked into any
+  desktop build:
+
+    github.com/ebitengine/gomobile
+        (v0.0.0-20250923094054-ea854a63cce1)   BSD 3-Clause
+        Verified from the module's LICENSE file:
+        "Copyright 2009 The Go Authors."
+
+================================================================================
+Scope of this file
+================================================================================
+
+Every license above was verified by reading the LICENSE file or SPDX header in
+the module as it is actually resolved into the build, except where marked
+FLAGGED, where the reason is stated. No license terms here were inferred from a
+package name, a badge, or convention.
+
+Two categories are deliberately absent, because appearing in the module graph is
+not the same as being linked:
+
+  - Build-time-only tools reached through cogentcore/webgpu's own module graph
+    (gofumpt, golang.org/x/tools, golang.org/x/mod, go-cmp, iancoleman/strcase,
+    the modernc.org packages, remyoudompheng/bigfft, lukechampine.com/uint128).
+    They appear in `go list -m all` for backend/gpu and are linked into no suren
+    binary.
+
+  - github.com/go-gl/glfw. It appears in backend/gpu's module graph via
+    cogentcore/webgpu's wgpuglfw package, which suren does not import: verified
+    absent from `go list -deps` for backend/gpu. suren renders offscreen and
+    reaches a window through backend/window (Ebiten) instead. If Phase 6b's
+    native surface present lands, it will link glfw behind the `gpupresent`
+    build tag and this file must gain an entry for it.

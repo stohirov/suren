@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/stohirov/sukho/internal/parity/fuzz"
+	"github.com/stohirov/suren/internal/parity/fuzz"
 )
 
 //go:embed regress

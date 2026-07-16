@@ -4,8 +4,8 @@ import (
 	stdpng "image/png"
 	"io"
 
-	"github.com/stohirov/sukho/backend/cpu"
-	"github.com/stohirov/sukho/scene"
+	"github.com/stohirov/suren/backend/cpu"
+	"github.com/stohirov/suren/scene"
 )
 
 func Encode(w io.Writer, s *scene.Scene, pxW, pxH int) error {

@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/stohirov/sukho/backend/cpu"
-	"github.com/stohirov/sukho/internal/parity/fuzz"
+	"github.com/stohirov/suren/backend/cpu"
+	"github.com/stohirov/suren/internal/parity/fuzz"
 )
 
 var (

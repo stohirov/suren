@@ -1,6 +1,6 @@
 package path
 
-import "github.com/stohirov/sukho/geom"
+import "github.com/stohirov/suren/geom"
 
 type Verb uint8
 

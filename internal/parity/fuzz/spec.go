@@ -18,12 +18,12 @@ package fuzz
 import (
 	"fmt"
 
-	"github.com/stohirov/sukho/geom"
-	"github.com/stohirov/sukho/internal/parity"
-	"github.com/stohirov/sukho/paint"
-	"github.com/stohirov/sukho/path"
-	"github.com/stohirov/sukho/render"
-	"github.com/stohirov/sukho/scene"
+	"github.com/stohirov/suren/geom"
+	"github.com/stohirov/suren/internal/parity"
+	"github.com/stohirov/suren/paint"
+	"github.com/stohirov/suren/path"
+	"github.com/stohirov/suren/render"
+	"github.com/stohirov/suren/scene"
 )
 
 type ShapeKind uint8

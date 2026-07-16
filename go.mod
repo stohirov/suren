@@ -1,3 +1,3 @@
-module github.com/stohirov/sukho
+module github.com/stohirov/suren
 
 go 1.26
